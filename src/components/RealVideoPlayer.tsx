@@ -61,7 +61,7 @@ export function extractYoutubeVideoId(url?: string): string | null {
   return match ? match[1] : null;
 }
 
-function loadYouTubeIframeApi(): Promise<any> {
+export function loadYouTubeIframeApi(): Promise<any> {
   return new Promise((resolve) => {
     if (window.YT && window.YT.Player) {
       resolve(window.YT);
@@ -143,17 +143,29 @@ export const RealVideoPlayer: React.FC<RealVideoPlayerProps> = ({
   onSelectFramingMode,
 }) => {
   const rawId = useId().replace(/:/g, '');
-  const containerId = `yt-real-player-${rawId}`;
-  const htmlVideoRef = useRef<HTMLVideoElement | null>(null);
+  const primaryYtContainerId = `yt-primary-pane-${rawId}`;
+  const secondaryYtContainerId = `yt-secondary-pane-${rawId}`;
+
+  const primaryVideoRef = useRef<HTMLVideoElement | null>(null);
   const secondaryVideoRef = useRef<HTMLVideoElement | null>(null);
-  const ternaryVideoRef = useRef<HTMLVideoElement | null>(null);
-  const ytPlayerRef = useRef<any>(null);
+
+  const primaryYtPlayerRef = useRef<any>(null);
+  const secondaryYtPlayerRef = useRef<any>(null);
+  const primaryYtReadyRef = useRef<boolean>(false);
+  const secondaryYtReadyRef = useRef<boolean>(false);
+  const pendingPlayRef = useRef<boolean>(false);
+
   const skipRangesRef = useRef<SkipRangeSec[]>(skipRanges);
   skipRangesRef.current = skipRanges;
+
+  // Prevent infinite seek loops across skip ranges
+  const jumpedRangesRef = useRef<Set<string>>(new Set());
+  const lastSeekTimestampMsRef = useRef<number>(0);
 
   // Never autoplay on load: isPlaying always starts false and only plays when clicked
   const [currentSec, setCurrentSec] = useState<number>(startSec);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [hasStartedOnce, setHasStartedOnce] = useState<boolean>(false);
   const [isMuted, setIsMuted] = useState<boolean>(mutedByDefault);
   const [skippedToast, setSkippedToast] = useState<string | null>(null);
   const [forcedMode, setForcedMode] = useState<VerticalLayoutMode | null>(null);
@@ -168,9 +180,13 @@ export const RealVideoPlayer: React.FC<RealVideoPlayerProps> = ({
   useEffect(() => {
     setCurrentSec(startSec);
     setIsPlaying(false);
+    setHasStartedOnce(false);
+    jumpedRangesRef.current.clear();
   }, [startSec, reframedCandidate?.id, youtubeId, previewObjectUrl]);
 
-  // Resolve active 9:16 framing keyframe at the current playback second
+  // Bucket currentSec to integer seconds for framing lookup so we don't recalculate styles every 150ms
+  const framingLookupSec = Math.floor(currentSec);
+
   const activeFraming: FramingKeyframe = useMemo(() => {
     if (!reframedCandidate) {
       if (forcedMode === 'SPLIT_TOP_BOTTOM') {
@@ -201,222 +217,389 @@ export const RealVideoPlayer: React.FC<RealVideoPlayerProps> = ({
     }
     return resolveActiveFramingAtSourceSec(
       reframedCandidate,
-      currentSec,
+      framingLookupSec,
       forcedMode
     );
-  }, [reframedCandidate, currentSec, forcedMode]);
+  }, [reframedCandidate, framingLookupSec, forcedMode]);
 
-  const primaryCropStyle = useMemo(
-    () => computeCropViewportStyle(activeFraming.primaryCropBox),
-    [activeFraming]
-  );
-  const secondaryCropStyle = useMemo(
-    () =>
-      computeCropViewportStyle(
-        activeFraming.secondaryCropBox || {
-          x: 0.52,
-          y: 0.05,
-          width: 0.4,
-          height: 0.5,
-        }
-      ),
-    [activeFraming]
-  );
-
-  // Sync secondary/ternary HTML5 video elements for real-time 9:16 split/crop panes
-  const syncCompanionVideos = (targetTime: number, playState?: boolean) => {
-    [secondaryVideoRef.current, ternaryVideoRef.current].forEach((vid) => {
-      if (!vid) return;
-      if (Math.abs(vid.currentTime - targetTime) > 0.35) {
-        vid.currentTime = targetTime;
-      }
-      if (playState === true && vid.paused) {
-        vid.play().catch(() => {});
-      } else if (playState === false && !vid.paused) {
-        vid.pause();
-      }
-    });
+  const primaryCropBox = activeFraming.primaryCropBox;
+  const secondaryCropBox = activeFraming.secondaryCropBox || {
+    x: 0.52,
+    y: 0.05,
+    width: 0.4,
+    height: 0.5,
   };
 
-  // Trigger skip check on any time update
-  const checkAndApplySkips = (sec: number, seekFn: (targetSec: number) => void) => {
-    if (endSec && sec >= endSec + 0.25) {
+  const primaryCropStyle = useMemo(
+    () => computeCropViewportStyle(primaryCropBox),
+    [
+      primaryCropBox.x,
+      primaryCropBox.y,
+      primaryCropBox.width,
+      primaryCropBox.height,
+    ]
+  );
+
+  const secondaryCropStyle = useMemo(
+    () => computeCropViewportStyle(secondaryCropBox),
+    [
+      secondaryCropBox.x,
+      secondaryCropBox.y,
+      secondaryCropBox.width,
+      secondaryCropBox.height,
+    ]
+  );
+
+  // Sync secondary HTML5 video element for 2-pane split layouts
+  const syncSecondaryHtmlVideo = (targetTime: number, playState?: boolean) => {
+    const vid = secondaryVideoRef.current;
+    if (!vid) return;
+    if (Math.abs(vid.currentTime - targetTime) > 0.3) {
+      vid.currentTime = targetTime;
+    }
+    if (playState === true && vid.paused) {
+      vid.play().catch(() => {});
+    } else if (playState === false && !vid.paused) {
+      vid.pause();
+    }
+  };
+
+  // Sync secondary YouTube player for 2-pane split layouts
+  const syncSecondaryYtPlayer = (targetTime: number, playState?: boolean) => {
+    const secPlayer = secondaryYtPlayerRef.current;
+    if (!secPlayer || !secondaryYtReadyRef.current) return;
+    try {
+      if (typeof secPlayer.getCurrentTime === 'function') {
+        const cur = Number(secPlayer.getCurrentTime() || 0);
+        if (Math.abs(cur - targetTime) > 1.2) {
+          secPlayer.seekTo?.(targetTime, true);
+        }
+      }
+      if (playState === true) {
+        secPlayer.playVideo?.();
+      } else if (playState === false) {
+        secPlayer.pauseVideo?.();
+      }
+    } catch {
+      // ignore transient YT iframe readiness errors
+    }
+  };
+
+  // Check and apply skip ranges with cooldown and visited-set so it NEVER loops or flickers
+  const checkAndApplySkips = (
+    sec: number,
+    isYouTubeSource: boolean,
+    seekFn: (targetSec: number) => void
+  ): number => {
+    const now = Date.now();
+    // Cooldown after any seek so the player has time to settle on the new frame
+    if (now - lastSeekTimestampMsRef.current < 1100) {
+      return sec;
+    }
+
+    if (endSec && sec >= endSec + 0.35) {
+      lastSeekTimestampMsRef.current = now;
+      jumpedRangesRef.current.clear();
       seekFn(startSec);
       return startSec;
     }
+
+    // For YouTube embeds, keyframe seeks are ~1.2s granular; only auto-jump ranges >= 1.2s
+    // so short 0.2s micro-cuts don't cause YouTube iframe re-buffering loops.
+    const minSkipDuration = isYouTubeSource ? 1.2 : 0.15;
+
     for (const r of skipRangesRef.current) {
+      const duration = r.endSec - r.startSec;
+      const rangeKey = `${r.startSec.toFixed(2)}-${r.endSec.toFixed(2)}`;
       if (
-        r.endSec > r.startSec + 0.08 &&
+        duration >= minSkipDuration &&
+        !jumpedRangesRef.current.has(rangeKey) &&
         sec >= r.startSec &&
-        sec < r.endSec - 0.05
+        sec < r.endSec - 0.1
       ) {
+        jumpedRangesRef.current.add(rangeKey);
+        lastSeekTimestampMsRef.current = now;
         seekFn(r.endSec);
-        const saved = (r.endSec - r.startSec).toFixed(1);
+        const saved = duration.toFixed(1);
         setSkippedToast(r.label || `Skipped ${saved}s`);
-        setTimeout(() => setSkippedToast(null), 1500);
+        setTimeout(() => setSkippedToast(null), 1400);
         return r.endSec;
       }
     }
     return sec;
   };
 
-  // Hidden YouTube IFrame API controller for synchronized audio & timecode (never autoplays on load!)
+  // Initialize persistent YouTube IFrame API players directly inside the visible 9:16 panes
   useEffect(() => {
     if (!youtubeId || previewObjectUrl) return;
     let isMounted = true;
     let pollTimer: number | null = null;
+    primaryYtReadyRef.current = false;
+    secondaryYtReadyRef.current = false;
+
+    const initialStart = Math.max(0, Math.floor(startSec));
 
     loadYouTubeIframeApi().then((YT) => {
       if (!isMounted || !YT || !YT.Player) return;
-      const el = document.getElementById(containerId);
-      if (!el) return;
 
-      if (ytPlayerRef.current?.destroy) {
-        try {
-          ytPlayerRef.current.destroy();
-        } catch {
-          // ignore
+      const primaryEl = document.getElementById(primaryYtContainerId);
+      if (primaryEl) {
+        if (primaryYtPlayerRef.current?.destroy) {
+          try {
+            primaryYtPlayerRef.current.destroy();
+          } catch {
+            // ignore
+          }
         }
+
+        primaryYtPlayerRef.current = new YT.Player(primaryYtContainerId, {
+          videoId: youtubeId,
+          width: '100%',
+          height: '100%',
+          playerVars: {
+            start: initialStart,
+            autoplay: 0,
+            controls: 0,
+            rel: 0,
+            modestbranding: 1,
+            playsinline: 1,
+            disablekb: 1,
+            fs: 0,
+            iv_load_policy: 3,
+          },
+          events: {
+            onReady: (event: any) => {
+              if (!isMounted) return;
+              primaryYtReadyRef.current = true;
+              try {
+                if (mutedByDefault) {
+                  event.target.mute?.();
+                } else {
+                  event.target.unMute?.();
+                  event.target.setVolume?.(100);
+                }
+                if (pendingPlayRef.current) {
+                  pendingPlayRef.current = false;
+                  if (!mutedByDefault) {
+                    event.target.unMute?.();
+                    event.target.setVolume?.(100);
+                  }
+                  event.target.playVideo?.();
+                }
+              } catch {
+                // ignore
+              }
+            },
+            onStateChange: (event: any) => {
+              if (!isMounted) return;
+              // YT.PlayerState.PLAYING === 1, PAUSED === 2, ENDED === 0
+              if (event.data === 1) {
+                setIsPlaying(true);
+                setHasStartedOnce(true);
+                const cur = Number(event.target?.getCurrentTime?.() || startSec);
+                syncSecondaryYtPlayer(cur, true);
+              } else if (event.data === 2 || event.data === 0) {
+                setIsPlaying(false);
+                syncSecondaryYtPlayer(
+                  Number(event.target?.getCurrentTime?.() || startSec),
+                  false
+                );
+              }
+            },
+          },
+        });
       }
 
-      ytPlayerRef.current = new YT.Player(containerId, {
-        videoId: youtubeId,
-        playerVars: {
-          start: Math.max(0, Math.floor(startSec)),
-          autoplay: 0,
-          controls: 0,
-          rel: 0,
-          modestbranding: 1,
-          playsinline: 1,
-        },
-        events: {
-          onReady: (event: any) => {
-            if (!isMounted) return;
-            if (mutedByDefault && event.target?.mute) {
-              event.target.mute();
-            }
+      const secondaryEl = document.getElementById(secondaryYtContainerId);
+      if (secondaryEl) {
+        if (secondaryYtPlayerRef.current?.destroy) {
+          try {
+            secondaryYtPlayerRef.current.destroy();
+          } catch {
+            // ignore
+          }
+        }
+
+        secondaryYtPlayerRef.current = new YT.Player(secondaryYtContainerId, {
+          videoId: youtubeId,
+          width: '100%',
+          height: '100%',
+          playerVars: {
+            start: initialStart,
+            autoplay: 0,
+            mute: 1,
+            controls: 0,
+            rel: 0,
+            modestbranding: 1,
+            playsinline: 1,
+            disablekb: 1,
+            fs: 0,
+            iv_load_policy: 3,
           },
-          onStateChange: (event: any) => {
-            if (!isMounted) return;
-            const playing = event.data === 1;
-            setIsPlaying(playing);
+          events: {
+            onReady: (event: any) => {
+              if (!isMounted) return;
+              secondaryYtReadyRef.current = true;
+              try {
+                event.target.mute?.();
+              } catch {
+                // ignore
+              }
+            },
           },
-        },
-      });
+        });
+      }
 
       pollTimer = window.setInterval(() => {
-        const p = ytPlayerRef.current;
-        if (p && typeof p.getCurrentTime === 'function' && typeof p.getPlayerState === 'function') {
+        const p = primaryYtPlayerRef.current;
+        if (
+          p &&
+          primaryYtReadyRef.current &&
+          typeof p.getCurrentTime === 'function' &&
+          typeof p.getPlayerState === 'function'
+        ) {
           if (p.getPlayerState() !== 1) return;
           const t = Number(p.getCurrentTime() || 0);
           if (t > 0) {
-            const nextT = checkAndApplySkips(t, (target) => {
-              p.seekTo(target, true);
+            const nextT = checkAndApplySkips(t, true, (target) => {
+              p.seekTo?.(target, true);
+              syncSecondaryYtPlayer(target, true);
             });
             setCurrentSec(nextT);
             onTimeUpdateSec?.(nextT);
           }
         }
-      }, 150);
+      }, 250);
     });
 
     return () => {
       isMounted = false;
       if (pollTimer) window.clearInterval(pollTimer);
-      if (ytPlayerRef.current?.destroy) {
+      if (primaryYtPlayerRef.current?.destroy) {
         try {
-          ytPlayerRef.current.destroy();
+          primaryYtPlayerRef.current.destroy();
+        } catch {
+          // ignore
+        }
+      }
+      if (secondaryYtPlayerRef.current?.destroy) {
+        try {
+          secondaryYtPlayerRef.current.destroy();
         } catch {
           // ignore
         }
       }
     };
-  }, [youtubeId, previewObjectUrl, containerId]);
+  }, [youtubeId, previewObjectUrl, primaryYtContainerId, secondaryYtContainerId]);
 
-  // Respond to external seek requests (when user clicks a specific timestamp)
+  // Respond to external seek requests (when user clicks a Story Beat pill)
   useEffect(() => {
     if (seekRequestSec === null || seekRequestSec === undefined) return;
     handleSeekToSec(seekRequestSec);
   }, [seekRequestSec]);
 
   const handleSeekToSec = (targetSec: number) => {
-    if (htmlVideoRef.current) {
-      htmlVideoRef.current.currentTime = targetSec;
-      htmlVideoRef.current.play().catch(() => {});
-      syncCompanionVideos(targetSec, true);
+    jumpedRangesRef.current.clear();
+    lastSeekTimestampMsRef.current = Date.now();
+    setHasStartedOnce(true);
+
+    if (primaryVideoRef.current) {
+      primaryVideoRef.current.currentTime = targetSec;
+      primaryVideoRef.current.muted = isMuted;
+      primaryVideoRef.current.play().catch(() => {});
+      syncSecondaryHtmlVideo(targetSec, true);
       setIsPlaying(true);
       setCurrentSec(targetSec);
       onTimeUpdateSec?.(targetSec);
       return;
     }
-    const p = ytPlayerRef.current;
-    if (p && typeof p.seekTo === 'function') {
+
+    const p = primaryYtPlayerRef.current;
+    if (p && primaryYtReadyRef.current && typeof p.seekTo === 'function') {
+      if (!isMuted) {
+        p.unMute?.();
+        p.setVolume?.(100);
+      }
       p.seekTo(targetSec, true);
-      if (typeof p.playVideo === 'function') p.playVideo();
+      p.playVideo?.();
+      syncSecondaryYtPlayer(targetSec, true);
       setIsPlaying(true);
       setCurrentSec(targetSec);
       onTimeUpdateSec?.(targetSec);
     } else {
+      pendingPlayRef.current = true;
       setCurrentSec(targetSec);
       setIsPlaying(true);
     }
   };
 
   const handleTogglePlay = () => {
-    if (htmlVideoRef.current) {
-      if (htmlVideoRef.current.paused) {
-        htmlVideoRef.current.play().catch(() => {});
-        syncCompanionVideos(htmlVideoRef.current.currentTime, true);
+    if (primaryVideoRef.current) {
+      if (primaryVideoRef.current.paused) {
+        primaryVideoRef.current.muted = isMuted;
+        primaryVideoRef.current.play().catch(() => {});
+        syncSecondaryHtmlVideo(primaryVideoRef.current.currentTime, true);
         setIsPlaying(true);
+        setHasStartedOnce(true);
       } else {
-        htmlVideoRef.current.pause();
-        syncCompanionVideos(htmlVideoRef.current.currentTime, false);
+        primaryVideoRef.current.pause();
+        syncSecondaryHtmlVideo(primaryVideoRef.current.currentTime, false);
         setIsPlaying(false);
       }
       return;
     }
-    const p = ytPlayerRef.current;
-    if (p) {
+
+    const p = primaryYtPlayerRef.current;
+    if (p && primaryYtReadyRef.current) {
       if (isPlaying && typeof p.pauseVideo === 'function') {
         p.pauseVideo();
+        syncSecondaryYtPlayer(currentSec, false);
         setIsPlaying(false);
       } else if (typeof p.playVideo === 'function') {
-        if (currentSec <= startSec + 0.5 && typeof p.seekTo === 'function') {
+        if (!isMuted) {
+          p.unMute?.();
+          p.setVolume?.(100);
+        }
+        if (!hasStartedOnce && startSec > 0 && typeof p.seekTo === 'function') {
+          lastSeekTimestampMsRef.current = Date.now();
           p.seekTo(startSec, true);
+          syncSecondaryYtPlayer(startSec, true);
+        } else {
+          syncSecondaryYtPlayer(currentSec, true);
         }
         p.playVideo();
+        setHasStartedOnce(true);
         setIsPlaying(true);
-      } else {
-        setIsPlaying((v) => !v);
       }
     } else {
-      setIsPlaying((v) => !v);
+      pendingPlayRef.current = true;
+      setHasStartedOnce(true);
+      setIsPlaying(true);
     }
   };
 
   const handleRestartMoment = () => {
+    jumpedRangesRef.current.clear();
     handleSeekToSec(startSec);
   };
 
   const handleToggleMute = () => {
-    if (htmlVideoRef.current) {
-      htmlVideoRef.current.muted = !htmlVideoRef.current.muted;
-      setIsMuted(htmlVideoRef.current.muted);
+    const nextMuted = !isMuted;
+    setIsMuted(nextMuted);
+
+    if (primaryVideoRef.current) {
+      primaryVideoRef.current.muted = nextMuted;
       return;
     }
-    const p = ytPlayerRef.current;
-    if (p) {
-      if (isMuted && typeof p.unMute === 'function') {
-        p.unMute();
-        setIsMuted(false);
-      } else if (typeof p.mute === 'function') {
-        p.mute();
-        setIsMuted(true);
+
+    const p = primaryYtPlayerRef.current;
+    if (p && primaryYtReadyRef.current) {
+      if (nextMuted) {
+        p.mute?.();
       } else {
-        setIsMuted((v) => !v);
+        p.unMute?.();
+        p.setVolume?.(100);
       }
-    } else {
-      setIsMuted((v) => !v);
     }
   };
 
@@ -425,135 +608,27 @@ export const RealVideoPlayer: React.FC<RealVideoPlayerProps> = ({
     onSelectFramingMode?.(mode);
   };
 
-  // Render a cropped 9:16 pane from either uploaded video or YouTube video
-  const renderCroppedPane = (
-    cropStyle: ReturnType<typeof computeCropViewportStyle>,
-    paneKey: string,
-    videoRef?: React.RefObject<HTMLVideoElement | null>
-  ) => {
-    if (previewObjectUrl) {
-      return (
-        <video
-          ref={videoRef}
-          src={previewObjectUrl}
-          muted
-          playsInline
-          style={{
-            width: '100%',
-            height: '100%',
-            objectFit: 'cover',
-            objectPosition: cropStyle.objectPosition,
-            transform: `scale(${cropStyle.scale})`,
-            transition:
-              'transform 380ms cubic-bezier(0.22, 1, 0.36, 1), object-position 380ms ease',
-          }}
-        />
-      );
-    }
-
-    if (youtubeId) {
-      const embedStart = Math.max(0, Math.floor(currentSec || startSec));
-      return (
-        <div className="w-full h-full relative overflow-hidden bg-[#1F1C18]">
-          {youtubePosterUrl && (
-            <img
-              src={`https://i.ytimg.com/vi/${youtubeId}/maxresdefault.jpg`}
-              onError={(e) => {
-                if (e.currentTarget.src !== youtubePosterUrl) {
-                  e.currentTarget.src = youtubePosterUrl;
-                }
-              }}
-              alt="9:16 Reframed Short"
-              style={{
-                position: 'absolute',
-                inset: 0,
-                width: '100%',
-                height: '100%',
-                objectFit: 'cover',
-                objectPosition: cropStyle.objectPosition,
-                transform: `scale(${cropStyle.scale})`,
-                transition:
-                  'transform 380ms cubic-bezier(0.22, 1, 0.36, 1), object-position 380ms ease',
-                filter: 'contrast(1.05) saturate(1.08)',
-              }}
-            />
-          )}
-          {isPlaying && (
-            <iframe
-              key={`${youtubeId}-${paneKey}-${Math.floor(embedStart / 12)}`}
-              title={`Reframed 9:16 Pane ${paneKey}`}
-              src={`https://www.youtube.com/embed/${youtubeId}?start=${embedStart}&autoplay=1&mute=1&controls=0&modestbranding=1&rel=0&playsinline=1`}
-              style={{
-                position: 'relative',
-                zIndex: 2,
-                width: `${cropStyle.iframeWidthPercent}%`,
-                height: '100%',
-                marginLeft: `${cropStyle.iframeMarginLeftPercent}%`,
-                border: 'none',
-                pointerEvents: 'none',
-                transition:
-                  'margin-left 380ms cubic-bezier(0.22, 1, 0.36, 1), width 380ms ease',
-              }}
-              allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture"
-            />
-          )}
-        </div>
-      );
-    }
-
-    return (
-      <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center text-[#FAF7F2]/80">
-        <p className="text-xs font-medium">
-          Drop an MP4 video or paste a YouTube link to preview your 9:16 Short
-        </p>
-      </div>
-    );
-  };
-
   const layoutMode = activeFraming.layout;
   const modeMeta = FRAMING_MODE_META[layoutMode];
   const hasMedia = Boolean(previewObjectUrl || youtubeId);
 
+  // Compute persistent pane heights so the video/iframe DOM nodes NEVER unmount when switching modes!
+  const topPaneHeightClass =
+    layoutMode === 'SINGLE_SPEAKER'
+      ? 'h-full'
+      : layoutMode === 'SPLIT_TOP_BOTTOM'
+        ? 'h-1/2 border-b-2 border-[#FAF7F2]'
+        : 'h-[70%] border-b-2 border-[#F59E0B]';
+
+  const bottomPaneHeightClass =
+    layoutMode === 'SINGLE_SPEAKER'
+      ? 'h-0 opacity-0 pointer-events-none overflow-hidden'
+      : layoutMode === 'SPLIT_TOP_BOTTOM'
+        ? 'h-1/2 opacity-100'
+        : 'h-[30%] opacity-100';
+
   return (
     <div className="space-y-3">
-      {/* Hidden audio/timecode master controller (never shown visually) */}
-      {previewObjectUrl ? (
-        <video
-          ref={htmlVideoRef}
-          src={previewObjectUrl}
-          playsInline
-          muted={isMuted}
-          onPlay={(e) => {
-            setIsPlaying(true);
-            syncCompanionVideos(e.currentTarget.currentTime, true);
-          }}
-          onPause={(e) => {
-            setIsPlaying(false);
-            syncCompanionVideos(e.currentTarget.currentTime, false);
-          }}
-          onLoadedMetadata={(e) => {
-            if (startSec > 0) {
-              e.currentTarget.currentTime = startSec;
-              syncCompanionVideos(startSec, false);
-            }
-          }}
-          onTimeUpdate={(e) => {
-            const sec = e.currentTarget.currentTime;
-            const nextSec = checkAndApplySkips(sec, (target) => {
-              e.currentTarget.currentTime = target;
-            });
-            syncCompanionVideos(nextSec);
-            setCurrentSec(nextSec);
-            onTimeUpdateSec?.(nextSec);
-          }}
-          className="w-px h-px opacity-0 pointer-events-none absolute -z-10"
-        />
-      ) : youtubeId ? (
-        <div className="w-px h-px opacity-0 pointer-events-none overflow-hidden absolute -z-10">
-          <div id={containerId} />
-        </div>
-      ) : null}
-
       {/* Compact 9:16 Camera Framing Mode Switcher */}
       <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-2xl bg-[#F3EDE2] border border-[#E8E0D2]">
         <div className="flex items-center gap-1.5">
@@ -621,7 +696,7 @@ export const RealVideoPlayer: React.FC<RealVideoPlayerProps> = ({
         </div>
       </div>
 
-      {/* ONLY the 9:16 Reframed Vertical Output (Click to Play) */}
+      {/* ONLY the 9:16 Reframed Vertical Output (Persistent DOM — Zero Flicker, Real Sound) */}
       <div className="flex flex-col items-center bg-[#FAF7F2] p-4 rounded-3xl border-2 border-[#E8E0D2]">
         <div
           onClick={() => {
@@ -636,80 +711,198 @@ export const RealVideoPlayer: React.FC<RealVideoPlayerProps> = ({
             }
           }}
           aria-label={isPlaying ? 'Pause 9:16 Short' : 'Play 9:16 Short'}
-          className="w-full max-w-[260px] aspect-[9/16] rounded-3xl overflow-hidden border-4 border-[#1F1C18] shadow-[0_18px_38px_-12px_rgba(31,28,24,0.35)] bg-[#1F1C18] relative cursor-pointer group"
+          className="w-full max-w-[260px] aspect-[9/16] rounded-3xl overflow-hidden border-4 border-[#1F1C18] shadow-[0_18px_38px_-12px_rgba(31,28,24,0.35)] bg-[#1F1C18] relative cursor-pointer group flex flex-col"
         >
-          {layoutMode === 'SINGLE_SPEAKER' && (
-            <div className="w-full h-full relative overflow-hidden">
-              {renderCroppedPane(
-                primaryCropStyle,
-                'reframed-single',
-                secondaryVideoRef
-              )}
-              <div className="pointer-events-none absolute inset-x-0 bottom-0 p-3 bg-gradient-to-t from-black/85 via-black/35 to-transparent">
+          {/* TOP / PRIMARY PANE (Always Mounted so Video/Audio Never Resets or Flickers) */}
+          <div
+            className={`w-full relative overflow-hidden transition-all duration-300 ${topPaneHeightClass}`}
+          >
+            {previewObjectUrl ? (
+              <video
+                ref={primaryVideoRef}
+                src={previewObjectUrl}
+                playsInline
+                muted={isMuted}
+                onPlay={(e) => {
+                  setIsPlaying(true);
+                  setHasStartedOnce(true);
+                  syncSecondaryHtmlVideo(e.currentTarget.currentTime, true);
+                }}
+                onPause={(e) => {
+                  setIsPlaying(false);
+                  syncSecondaryHtmlVideo(e.currentTarget.currentTime, false);
+                }}
+                onLoadedMetadata={(e) => {
+                  if (startSec > 0) {
+                    e.currentTarget.currentTime = startSec;
+                    syncSecondaryHtmlVideo(startSec, false);
+                  }
+                }}
+                onTimeUpdate={(e) => {
+                  const sec = e.currentTarget.currentTime;
+                  const nextSec = checkAndApplySkips(sec, false, (target) => {
+                    e.currentTarget.currentTime = target;
+                  });
+                  syncSecondaryHtmlVideo(nextSec);
+                  setCurrentSec(nextSec);
+                  onTimeUpdateSec?.(nextSec);
+                }}
+                style={{
+                  width: '100%',
+                  height: '100%',
+                  objectFit: 'cover',
+                  objectPosition: primaryCropStyle.objectPosition,
+                  transform: `scale(${primaryCropStyle.scale})`,
+                }}
+              />
+            ) : youtubeId ? (
+              <div className="w-full h-full relative overflow-hidden bg-[#1F1C18]">
+                {/* Persistent YouTube Player (Unmuted Master Audio + Video) */}
+                <div
+                  style={{
+                    position: 'relative',
+                    zIndex: 2,
+                    width: `${primaryCropStyle.iframeWidthPercent}%`,
+                    height: '100%',
+                    marginLeft: `${primaryCropStyle.iframeMarginLeftPercent}%`,
+                    pointerEvents: 'none',
+                  }}
+                >
+                  <div id={primaryYtContainerId} className="w-full h-full" />
+                </div>
+
+                {/* High-res poster shown only before playback starts */}
+                {!hasStartedOnce && youtubePosterUrl && (
+                  <img
+                    src={`https://i.ytimg.com/vi/${youtubeId}/maxresdefault.jpg`}
+                    onError={(e) => {
+                      if (e.currentTarget.src !== youtubePosterUrl) {
+                        e.currentTarget.src = youtubePosterUrl;
+                      }
+                    }}
+                    alt="9:16 Reframed Short"
+                    style={{
+                      position: 'absolute',
+                      inset: 0,
+                      zIndex: 3,
+                      width: '100%',
+                      height: '100%',
+                      objectFit: 'cover',
+                      objectPosition: primaryCropStyle.objectPosition,
+                      transform: `scale(${primaryCropStyle.scale})`,
+                      filter: 'contrast(1.05) saturate(1.08)',
+                    }}
+                  />
+                )}
+              </div>
+            ) : (
+              <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center text-[#FAF7F2]/80">
+                <p className="text-xs font-medium">
+                  Drop an MP4 video or paste a YouTube link to preview your 9:16 Short
+                </p>
+              </div>
+            )}
+
+            {/* Top / Primary Badge Overlay */}
+            {layoutMode === 'SINGLE_SPEAKER' && (
+              <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 p-3 bg-gradient-to-t from-black/85 via-black/35 to-transparent">
                 <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-[#E05A47] text-white text-[10px] font-bold">
                   🎯 {activeFraming.activeSpeaker || 'Speaker 1'}
                 </span>
               </div>
-            </div>
-          )}
+            )}
 
-          {layoutMode === 'SPLIT_TOP_BOTTOM' && (
-            <div className="w-full h-full flex flex-col">
-              <div className="h-1/2 relative border-b-2 border-[#FAF7F2] overflow-hidden">
-                {renderCroppedPane(
-                  primaryCropStyle,
-                  'reframed-top',
-                  secondaryVideoRef
-                )}
-                <div className="pointer-events-none absolute top-2 left-2 z-10">
-                  <span className="px-2 py-0.5 rounded-full bg-[#E05A47] text-white text-[10px] font-bold shadow">
-                    {activeFraming.activeSpeaker || 'Speaker 1'}
-                  </span>
-                </div>
+            {layoutMode === 'SPLIT_TOP_BOTTOM' && (
+              <div className="pointer-events-none absolute top-2 left-2 z-10">
+                <span className="px-2 py-0.5 rounded-full bg-[#E05A47] text-white text-[10px] font-bold shadow">
+                  {activeFraming.activeSpeaker || 'Speaker 1'}
+                </span>
               </div>
-              <div className="h-1/2 relative overflow-hidden">
-                {renderCroppedPane(
-                  secondaryCropStyle,
-                  'reframed-bottom',
-                  ternaryVideoRef
-                )}
-                <div className="pointer-events-none absolute bottom-2 left-2 z-10">
-                  <span className="px-2 py-0.5 rounded-full bg-[#2D8A61] text-white text-[10px] font-bold shadow">
-                    {activeFraming.secondarySpeaker || 'Speaker 2'}
-                  </span>
-                </div>
-              </div>
-            </div>
-          )}
+            )}
 
-          {layoutMode === 'CONTENT_ZOOM_PIP' && (
-            <div className="w-full h-full flex flex-col">
-              <div className="h-[70%] relative border-b-2 border-[#F59E0B] overflow-hidden">
-                {renderCroppedPane(
-                  primaryCropStyle,
-                  'reframed-content',
-                  secondaryVideoRef
-                )}
-                <div className="pointer-events-none absolute top-2 left-2 z-10">
-                  <span className="px-2 py-0.5 rounded-full bg-[#F59E0B] text-[#1F1C18] text-[10px] font-bold shadow">
-                    🔍 {activeFraming.screenContentTitle || 'Content Zoom'}
-                  </span>
-                </div>
+            {layoutMode === 'CONTENT_ZOOM_PIP' && (
+              <div className="pointer-events-none absolute top-2 left-2 z-10">
+                <span className="px-2 py-0.5 rounded-full bg-[#F59E0B] text-[#1F1C18] text-[10px] font-bold shadow">
+                  🔍 {activeFraming.screenContentTitle || 'Content Zoom'}
+                </span>
               </div>
-              <div className="h-[30%] relative overflow-hidden">
-                {renderCroppedPane(
-                  secondaryCropStyle,
-                  'reframed-pip',
-                  ternaryVideoRef
-                )}
-                <div className="pointer-events-none absolute bottom-1.5 left-2 z-10">
-                  <span className="px-2 py-0.5 rounded-full bg-[#FAF7F2]/95 text-[#1F1C18] text-[10px] font-bold shadow">
-                    {activeFraming.activeSpeaker || 'Speaker Face'}
-                  </span>
+            )}
+          </div>
+
+          {/* BOTTOM / SECONDARY PANE (Always Mounted for Instant Zero-Flicker Split View) */}
+          <div
+            className={`w-full relative overflow-hidden transition-all duration-300 ${bottomPaneHeightClass}`}
+          >
+            {previewObjectUrl ? (
+              <video
+                ref={secondaryVideoRef}
+                src={previewObjectUrl}
+                muted
+                playsInline
+                style={{
+                  width: '100%',
+                  height: '100%',
+                  objectFit: 'cover',
+                  objectPosition: secondaryCropStyle.objectPosition,
+                  transform: `scale(${secondaryCropStyle.scale})`,
+                }}
+              />
+            ) : youtubeId ? (
+              <div className="w-full h-full relative overflow-hidden bg-[#1F1C18]">
+                <div
+                  style={{
+                    position: 'relative',
+                    zIndex: 2,
+                    width: `${secondaryCropStyle.iframeWidthPercent}%`,
+                    height: '100%',
+                    marginLeft: `${secondaryCropStyle.iframeMarginLeftPercent}%`,
+                    pointerEvents: 'none',
+                  }}
+                >
+                  <div id={secondaryYtContainerId} className="w-full h-full" />
                 </div>
+
+                {!hasStartedOnce && youtubePosterUrl && (
+                  <img
+                    src={`https://i.ytimg.com/vi/${youtubeId}/maxresdefault.jpg`}
+                    onError={(e) => {
+                      if (e.currentTarget.src !== youtubePosterUrl) {
+                        e.currentTarget.src = youtubePosterUrl;
+                      }
+                    }}
+                    alt="9:16 Secondary Pane"
+                    style={{
+                      position: 'absolute',
+                      inset: 0,
+                      zIndex: 3,
+                      width: '100%',
+                      height: '100%',
+                      objectFit: 'cover',
+                      objectPosition: secondaryCropStyle.objectPosition,
+                      transform: `scale(${secondaryCropStyle.scale})`,
+                      filter: 'contrast(1.05) saturate(1.08)',
+                    }}
+                  />
+                )}
               </div>
-            </div>
-          )}
+            ) : null}
+
+            {layoutMode === 'SPLIT_TOP_BOTTOM' && (
+              <div className="pointer-events-none absolute bottom-2 left-2 z-10">
+                <span className="px-2 py-0.5 rounded-full bg-[#2D8A61] text-white text-[10px] font-bold shadow">
+                  {activeFraming.secondarySpeaker || 'Speaker 2'}
+                </span>
+              </div>
+            )}
+
+            {layoutMode === 'CONTENT_ZOOM_PIP' && (
+              <div className="pointer-events-none absolute bottom-1.5 left-2 z-10">
+                <span className="px-2 py-0.5 rounded-full bg-[#FAF7F2]/95 text-[#1F1C18] text-[10px] font-bold shadow">
+                  {activeFraming.activeSpeaker || 'Speaker Face'}
+                </span>
+              </div>
+            )}
+          </div>
 
           {/* Click-to-Play Overlay when paused (Never autoplays on load!) */}
           {hasMedia && !isPlaying && (
@@ -771,12 +964,19 @@ export const RealVideoPlayer: React.FC<RealVideoPlayerProps> = ({
             <button
               type="button"
               onClick={handleToggleMute}
+              aria-label={isMuted ? 'Unmute audio' : 'Mute audio'}
               className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-[#FAF7F2] border border-[#E8E0D2] text-[#1F1C18] font-medium hover:bg-[#E8E0D2] transition-colors cursor-pointer"
             >
               {isMuted ? (
-                <VolumeX className="w-3.5 h-3.5 text-[#E05A47]" />
+                <>
+                  <VolumeX className="w-3.5 h-3.5 text-[#E05A47]" />
+                  <span>Muted</span>
+                </>
               ) : (
-                <Volume2 className="w-3.5 h-3.5 text-[#2D8A61]" />
+                <>
+                  <Volume2 className="w-3.5 h-3.5 text-[#2D8A61]" />
+                  <span>Sound On</span>
+                </>
               )}
             </button>
           </div>

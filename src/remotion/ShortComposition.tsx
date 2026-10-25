@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect, useId, useMemo, useRef } from 'react';
 import {
   AbsoluteFill,
   Video,
@@ -21,19 +21,15 @@ import {
   computeCropViewportStyle,
   formatSecondsToMMSS,
 } from '../utils/edlCompiler';
+import {
+  extractYoutubeVideoId,
+  loadYouTubeIframeApi,
+} from '../components/RealVideoPlayer';
 
 export interface ShortCompositionProps {
   candidate: ShortEDL;
   previewObjectUrl?: string;
   forcedCameraMode?: VerticalLayoutMode | null;
-}
-
-function extractYoutubeVideoId(url?: string): string | null {
-  if (!url) return null;
-  const match = url.match(
-    /(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/
-  );
-  return match ? match[1] : null;
 }
 
 function getActiveCut(
@@ -82,6 +78,17 @@ export const ShortComposition: React.FC<ShortCompositionProps> = ({
 }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
+  const rawId = useId().replace(/:/g, '');
+  const primaryYtId = `remotion-yt-primary-${rawId}`;
+  const secondaryYtId = `remotion-yt-secondary-${rawId}`;
+
+  const primaryYtPlayerRef = useRef<any>(null);
+  const secondaryYtPlayerRef = useRef<any>(null);
+  const primaryReadyRef = useRef<boolean>(false);
+  const secondaryReadyRef = useRef<boolean>(false);
+  const lastSeekWallMsRef = useRef<number>(0);
+  const prevFrameRef = useRef<number>(frame);
+  const pauseTimerRef = useRef<number | null>(null);
 
   const timelineMs = Math.round((frame / fps) * 1000);
   const hookDurationMs = candidate.packaging?.hookBanner?.durationMs || 3000;
@@ -112,28 +119,225 @@ export const ShortComposition: React.FC<ShortCompositionProps> = ({
   const layout: VerticalLayoutMode =
     forcedCameraMode || activeKeyframe?.layout || 'SINGLE_SPEAKER';
 
-  const primaryCropStyle = computeCropViewportStyle(
-    activeKeyframe?.primaryCropBox
+  const primaryCropBox = activeKeyframe?.primaryCropBox || {
+    x: 0.14,
+    y: 0.06,
+    width: 0.42,
+    height: 0.88,
+  };
+  const secondaryCropBox = activeKeyframe?.secondaryCropBox || {
+    x: 0.52,
+    y: 0.05,
+    width: 0.4,
+    height: 0.5,
+  };
+
+  const primaryCropStyle = useMemo(
+    () => computeCropViewportStyle(primaryCropBox),
+    [
+      primaryCropBox.x,
+      primaryCropBox.y,
+      primaryCropBox.width,
+      primaryCropBox.height,
+    ]
   );
-  const secondaryCropStyle = computeCropViewportStyle(
-    activeKeyframe?.secondaryCropBox || {
-      x: 0.52,
-      y: 0.05,
-      width: 0.4,
-      height: 0.5,
-    }
+
+  const secondaryCropStyle = useMemo(
+    () => computeCropViewportStyle(secondaryCropBox),
+    [
+      secondaryCropBox.x,
+      secondaryCropBox.y,
+      secondaryCropBox.width,
+      secondaryCropBox.height,
+    ]
   );
 
   const youtubeId = extractYoutubeVideoId(candidate.sourceVideoUri);
   const youtubePosterUrl = youtubeId
     ? `https://i.ytimg.com/vi/${youtubeId}/hqdefault.jpg`
     : undefined;
-  const youtubeStartSec = Math.max(
-    0,
-    Math.floor(
-      (activeCut?.sourceStartMs ?? candidate.rawSourceStartSec * 1000) / 1000
-    )
-  );
+
+  const targetSourceSec = useMemo(() => {
+    if (activeCut && Number.isFinite(activeCut.sourceStartMs)) {
+      const offsetInCutMs = Math.max(0, timelineMs - (activeCut.timelineStartMs || 0));
+      return Math.max(0, (activeCut.sourceStartMs + offsetInCutMs) / 1000);
+    }
+    return Math.max(0, (candidate.rawSourceStartSec || 0) + timelineMs / 1000);
+  }, [activeCut, timelineMs, candidate.rawSourceStartSec]);
+
+  // Mount persistent YT.Player instances once per YouTube ID so the video never reloads or flickers!
+  useEffect(() => {
+    if (!youtubeId || previewObjectUrl) return;
+    let isMounted = true;
+    primaryReadyRef.current = false;
+    secondaryReadyRef.current = false;
+    const initialStart = Math.max(0, Math.floor(candidate.rawSourceStartSec || 0));
+
+    loadYouTubeIframeApi().then((YT) => {
+      if (!isMounted || !YT || !YT.Player) return;
+
+      const primaryEl = document.getElementById(primaryYtId);
+      if (primaryEl) {
+        if (primaryYtPlayerRef.current?.destroy) {
+          try {
+            primaryYtPlayerRef.current.destroy();
+          } catch {
+            // ignore
+          }
+        }
+        primaryYtPlayerRef.current = new YT.Player(primaryYtId, {
+          videoId: youtubeId,
+          width: '100%',
+          height: '100%',
+          playerVars: {
+            start: initialStart,
+            autoplay: 0,
+            controls: 0,
+            rel: 0,
+            modestbranding: 1,
+            playsinline: 1,
+            disablekb: 1,
+            fs: 0,
+            iv_load_policy: 3,
+          },
+          events: {
+            onReady: (event: any) => {
+              if (!isMounted) return;
+              primaryReadyRef.current = true;
+              try {
+                event.target.unMute?.();
+                event.target.setVolume?.(100);
+              } catch {
+                // ignore
+              }
+            },
+          },
+        });
+      }
+
+      const secondaryEl = document.getElementById(secondaryYtId);
+      if (secondaryEl) {
+        if (secondaryYtPlayerRef.current?.destroy) {
+          try {
+            secondaryYtPlayerRef.current.destroy();
+          } catch {
+            // ignore
+          }
+        }
+        secondaryYtPlayerRef.current = new YT.Player(secondaryYtId, {
+          videoId: youtubeId,
+          width: '100%',
+          height: '100%',
+          playerVars: {
+            start: initialStart,
+            autoplay: 0,
+            mute: 1,
+            controls: 0,
+            rel: 0,
+            modestbranding: 1,
+            playsinline: 1,
+            disablekb: 1,
+            fs: 0,
+            iv_load_policy: 3,
+          },
+          events: {
+            onReady: (event: any) => {
+              if (!isMounted) return;
+              secondaryReadyRef.current = true;
+              try {
+                event.target.mute?.();
+              } catch {
+                // ignore
+              }
+            },
+          },
+        });
+      }
+    });
+
+    return () => {
+      isMounted = false;
+      if (pauseTimerRef.current) window.clearTimeout(pauseTimerRef.current);
+      if (primaryYtPlayerRef.current?.destroy) {
+        try {
+          primaryYtPlayerRef.current.destroy();
+        } catch {
+          // ignore
+        }
+      }
+      if (secondaryYtPlayerRef.current?.destroy) {
+        try {
+          secondaryYtPlayerRef.current.destroy();
+        } catch {
+          // ignore
+        }
+      }
+    };
+  }, [youtubeId, previewObjectUrl, primaryYtId, secondaryYtId, candidate.rawSourceStartSec]);
+
+  // Synchronize YT.Player play/pause and large seeks with Remotion frame progression
+  useEffect(() => {
+    if (!youtubeId || previewObjectUrl) return;
+    const p = primaryYtPlayerRef.current;
+    const s = secondaryYtPlayerRef.current;
+
+    const frameChanged = frame !== prevFrameRef.current;
+    prevFrameRef.current = frame;
+
+    if (frameChanged && frame > 0) {
+      if (p && primaryReadyRef.current) {
+        try {
+          const state = p.getPlayerState?.();
+          if (state !== 1) {
+            p.unMute?.();
+            p.setVolume?.(100);
+            p.playVideo?.();
+          }
+          const cur = Number(p.getCurrentTime?.() || targetSourceSec);
+          const now = Date.now();
+          if (
+            Math.abs(cur - targetSourceSec) > 2.0 &&
+            now - lastSeekWallMsRef.current > 1200
+          ) {
+            lastSeekWallMsRef.current = now;
+            p.seekTo?.(targetSourceSec, true);
+            if (s && secondaryReadyRef.current) {
+              s.seekTo?.(targetSourceSec, true);
+            }
+          }
+        } catch {
+          // ignore
+        }
+      }
+      if (s && secondaryReadyRef.current) {
+        try {
+          if (s.getPlayerState?.() !== 1) {
+            s.mute?.();
+            s.playVideo?.();
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      if (pauseTimerRef.current) window.clearTimeout(pauseTimerRef.current);
+      pauseTimerRef.current = window.setTimeout(() => {
+        try {
+          primaryYtPlayerRef.current?.pauseVideo?.();
+          secondaryYtPlayerRef.current?.pauseVideo?.();
+        } catch {
+          // ignore
+        }
+      }, 260);
+    } else if (frame === 0) {
+      try {
+        primaryYtPlayerRef.current?.pauseVideo?.();
+        secondaryYtPlayerRef.current?.pauseVideo?.();
+      } catch {
+        // ignore
+      }
+    }
+  }, [frame, youtubeId, previewObjectUrl, targetSourceSec]);
 
   const hookEntrance = spring({
     frame,
@@ -171,75 +375,21 @@ export const ShortComposition: React.FC<ShortCompositionProps> = ({
     },
   });
 
-  const zoomScale = interpolate(cameraTransition, [0, 1], [1.03, 1.0]);
+  const zoomScale = interpolate(cameraTransition, [0, 1], [1.02, 1.0]);
 
-  const renderRealVideoFeed = (
-    cropStyle: ReturnType<typeof computeCropViewportStyle>,
-    keySuffix: string,
-    muteFeed = false
-  ) => {
-    if (previewObjectUrl) {
-      return (
-        <Video
-          key={keySuffix}
-          src={previewObjectUrl}
-          muted={muteFeed}
-          style={{
-            width: '100%',
-            height: '100%',
-            objectFit: 'cover',
-            objectPosition: cropStyle.objectPosition,
-            transform: `scale(${cropStyle.scale})`,
-          }}
-        />
-      );
-    }
-    if (youtubeId) {
-      return (
-        <div className="w-full h-full relative overflow-hidden bg-[#1F1C18]">
-          {youtubePosterUrl && (
-            <img
-              src={`https://i.ytimg.com/vi/${youtubeId}/maxresdefault.jpg`}
-              onError={(e) => {
-                if (e.currentTarget.src !== youtubePosterUrl) {
-                  e.currentTarget.src = youtubePosterUrl;
-                }
-              }}
-              alt="YouTube Frame"
-              style={{
-                position: 'absolute',
-                inset: 0,
-                width: '100%',
-                height: '100%',
-                objectFit: 'cover',
-                objectPosition: cropStyle.objectPosition,
-                transform: `scale(${cropStyle.scale})`,
-                filter: 'contrast(1.04) saturate(1.06)',
-              }}
-            />
-          )}
-          {frame > 0 && !muteFeed && (
-            <iframe
-              key={`${youtubeId}-${keySuffix}-${youtubeStartSec}`}
-              title={`YouTube 9:16 Feed ${keySuffix}`}
-              src={`https://www.youtube.com/embed/${youtubeId}?start=${youtubeStartSec}&autoplay=1&mute=1&controls=0&modestbranding=1&rel=0&playsinline=1`}
-              style={{
-                position: 'relative',
-                zIndex: 2,
-                width: `${cropStyle.iframeWidthPercent}%`,
-                height: '100%',
-                marginLeft: `${cropStyle.iframeMarginLeftPercent}%`,
-                border: 'none',
-                pointerEvents: 'none',
-              }}
-              allow="accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture"
-            />
-          )}
-        </div>
-      );
-    }
-    return null;
-  };
+  // Persistent flex pane heights so switching between 1-speaker, Top/Bottom, and Screen+Face never unmounts the video
+  const topPaneHeight =
+    layout === 'SINGLE_SPEAKER'
+      ? '100%'
+      : layout === 'SPLIT_TOP_BOTTOM'
+        ? '50%'
+        : '70%';
+  const bottomPaneHeight =
+    layout === 'SINGLE_SPEAKER'
+      ? '0%'
+      : layout === 'SPLIT_TOP_BOTTOM'
+        ? '50%'
+        : '30%';
 
   return (
     <AbsoluteFill
@@ -250,101 +400,193 @@ export const ShortComposition: React.FC<ShortCompositionProps> = ({
         overflow: 'hidden',
       }}
     >
-      {/* 9:16 Smart Auto-Framing Stage */}
+      {/* 9:16 Smart Auto-Framing Stage (Persistent 2-Pane Flex Container) */}
       <AbsoluteFill
         style={{
           transform: `scale(${zoomScale})`,
+          display: 'flex',
+          flexDirection: 'column',
         }}
       >
-        {layout === 'SINGLE_SPEAKER' && (
-          <div className="w-full h-full relative overflow-hidden bg-[#1F1C18]">
-            <div className="absolute inset-0">
-              {renderRealVideoFeed(primaryCropStyle, 'single-main')}
-            </div>
-            <div
+        {/* TOP / PRIMARY PANE (Always Mounted) */}
+        <div
+          style={{
+            height: topPaneHeight,
+            width: '100%',
+            position: 'relative',
+            overflow: 'hidden',
+            borderBottom:
+              layout === 'SPLIT_TOP_BOTTOM'
+                ? '4px solid #FAF7F2'
+                : layout === 'CONTENT_ZOOM_PIP'
+                  ? '4px solid #F59E0B'
+                  : 'none',
+            transition: 'height 280ms ease',
+          }}
+        >
+          {previewObjectUrl ? (
+            <Video
+              src={previewObjectUrl}
+              muted={false}
               style={{
-                position: 'absolute',
-                inset: 0,
-                zIndex: 5,
-                background:
-                  'linear-gradient(180deg, rgba(31,28,24,0.45) 0%, transparent 28%, transparent 68%, rgba(31,28,24,0.82) 100%)',
+                width: '100%',
+                height: '100%',
+                objectFit: 'cover',
+                objectPosition: primaryCropStyle.objectPosition,
+                transform: `scale(${primaryCropStyle.scale})`,
               }}
             />
-            {!isHookActive && (
-              <div className="relative z-10 p-4 flex items-center justify-between">
-                <span className="px-3 py-1 rounded-full bg-[#FAF7F2]/95 text-[#1F1C18] text-xs font-bold shadow">
-                  🎯 1 Speaker Focus
-                </span>
-                <span className="px-2.5 py-1 rounded-full bg-[#1F1C18]/85 text-[#FAF7F2] text-xs font-semibold">
-                  {activeKeyframe?.activeSpeaker || activeCut?.speaker || 'Host'}
-                </span>
+          ) : youtubeId ? (
+            <div className="w-full h-full relative overflow-hidden bg-[#1F1C18]">
+              <div
+                style={{
+                  position: 'relative',
+                  zIndex: 2,
+                  width: `${primaryCropStyle.iframeWidthPercent}%`,
+                  height: '100%',
+                  marginLeft: `${primaryCropStyle.iframeMarginLeftPercent}%`,
+                  pointerEvents: 'none',
+                }}
+              >
+                <div id={primaryYtId} className="w-full h-full" />
               </div>
-            )}
-          </div>
-        )}
 
-        {layout === 'SPLIT_TOP_BOTTOM' && (
-          <div className="w-full h-full flex flex-col bg-[#1F1C18]">
-            {/* Top 50%: Speaker 1 */}
-            <div className="h-1/2 relative border-b-4 border-[#FAF7F2] overflow-hidden">
-              <div className="absolute inset-0">
-                {renderRealVideoFeed(primaryCropStyle, 'split-top')}
-              </div>
-              {!isHookActive && (
-                <div className="relative z-10 p-3 flex items-center justify-between">
-                  <span className="px-2.5 py-0.5 rounded-full bg-[#E05A47] text-white text-[11px] font-bold shadow">
-                    {activeKeyframe?.activeSpeaker || 'Speaker 1'}
-                  </span>
-                  <span className="px-2 py-0.5 rounded-full bg-[#FAF7F2]/95 text-[#1F1C18] text-[10px] font-bold">
-                    👥 Top &amp; Bottom Split
-                  </span>
-                </div>
+              {frame === 0 && youtubePosterUrl && (
+                <img
+                  src={`https://i.ytimg.com/vi/${youtubeId}/maxresdefault.jpg`}
+                  onError={(e) => {
+                    if (e.currentTarget.src !== youtubePosterUrl) {
+                      e.currentTarget.src = youtubePosterUrl;
+                    }
+                  }}
+                  alt="YouTube Frame"
+                  style={{
+                    position: 'absolute',
+                    inset: 0,
+                    zIndex: 3,
+                    width: '100%',
+                    height: '100%',
+                    objectFit: 'cover',
+                    objectPosition: primaryCropStyle.objectPosition,
+                    transform: `scale(${primaryCropStyle.scale})`,
+                    filter: 'contrast(1.04) saturate(1.06)',
+                  }}
+                />
               )}
             </div>
+          ) : null}
 
-            {/* Bottom 50%: Speaker 2 synced */}
-            <div className="h-1/2 relative overflow-hidden">
-              <div className="absolute inset-0">
-                {renderRealVideoFeed(secondaryCropStyle, 'split-bottom', true)}
-              </div>
-              <div className="relative z-10 p-3 flex items-center justify-between">
-                <span className="px-2.5 py-0.5 rounded-full bg-[#2D8A61] text-white text-[11px] font-bold shadow">
-                  {activeKeyframe?.secondarySpeaker || 'Speaker 2'}
-                </span>
-              </div>
+          {!isHookActive && layout === 'SINGLE_SPEAKER' && (
+            <div className="relative z-10 p-4 flex items-center justify-between">
+              <span className="px-3 py-1 rounded-full bg-[#FAF7F2]/95 text-[#1F1C18] text-xs font-bold shadow">
+                🎯 1 Speaker Focus
+              </span>
+              <span className="px-2.5 py-1 rounded-full bg-[#1F1C18]/85 text-[#FAF7F2] text-xs font-semibold">
+                {activeKeyframe?.activeSpeaker || activeCut?.speaker || 'Host'}
+              </span>
             </div>
-          </div>
-        )}
+          )}
 
-        {layout === 'CONTENT_ZOOM_PIP' && (
-          <div className="w-full h-full flex flex-col bg-[#1F1C18]">
-            {/* Top 70%: Zoomed Screen Share */}
-            <div className="h-[70%] relative border-b-4 border-[#F59E0B] overflow-hidden">
-              <div className="absolute inset-0">
-                {renderRealVideoFeed(primaryCropStyle, 'pip-screen')}
+          {!isHookActive && layout === 'SPLIT_TOP_BOTTOM' && (
+            <div className="relative z-10 p-3 flex items-center justify-between">
+              <span className="px-2.5 py-0.5 rounded-full bg-[#E05A47] text-white text-[11px] font-bold shadow">
+                {activeKeyframe?.activeSpeaker || 'Speaker 1'}
+              </span>
+              <span className="px-2 py-0.5 rounded-full bg-[#FAF7F2]/95 text-[#1F1C18] text-[10px] font-bold">
+                👥 Top &amp; Bottom Split
+              </span>
+            </div>
+          )}
+
+          {!isHookActive && layout === 'CONTENT_ZOOM_PIP' && (
+            <div className="relative z-10 p-3 flex items-center justify-between">
+              <span className="px-3 py-1 rounded-full bg-[#F59E0B] text-[#1F1C18] text-[11px] font-bold shadow">
+                🔍 {activeKeyframe?.screenContentTitle || 'Screen Share Zoom'}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* BOTTOM / SECONDARY PANE (Always Mounted) */}
+        <div
+          style={{
+            height: bottomPaneHeight,
+            width: '100%',
+            position: 'relative',
+            overflow: 'hidden',
+            opacity: layout === 'SINGLE_SPEAKER' ? 0 : 1,
+            pointerEvents: 'none',
+            transition: 'height 280ms ease, opacity 200ms ease',
+          }}
+        >
+          {previewObjectUrl ? (
+            <Video
+              src={previewObjectUrl}
+              muted
+              style={{
+                width: '100%',
+                height: '100%',
+                objectFit: 'cover',
+                objectPosition: secondaryCropStyle.objectPosition,
+                transform: `scale(${secondaryCropStyle.scale})`,
+              }}
+            />
+          ) : youtubeId ? (
+            <div className="w-full h-full relative overflow-hidden bg-[#1F1C18]">
+              <div
+                style={{
+                  position: 'relative',
+                  zIndex: 2,
+                  width: `${secondaryCropStyle.iframeWidthPercent}%`,
+                  height: '100%',
+                  marginLeft: `${secondaryCropStyle.iframeMarginLeftPercent}%`,
+                  pointerEvents: 'none',
+                }}
+              >
+                <div id={secondaryYtId} className="w-full h-full" />
               </div>
-              {!isHookActive && (
-                <div className="relative z-10 p-3 flex items-center justify-between">
-                  <span className="px-3 py-1 rounded-full bg-[#F59E0B] text-[#1F1C18] text-[11px] font-bold shadow">
-                    🔍 {activeKeyframe?.screenContentTitle || 'Screen Share Zoom'}
-                  </span>
-                </div>
+
+              {frame === 0 && youtubePosterUrl && (
+                <img
+                  src={`https://i.ytimg.com/vi/${youtubeId}/maxresdefault.jpg`}
+                  onError={(e) => {
+                    if (e.currentTarget.src !== youtubePosterUrl) {
+                      e.currentTarget.src = youtubePosterUrl;
+                    }
+                  }}
+                  alt="YouTube Secondary Frame"
+                  style={{
+                    position: 'absolute',
+                    inset: 0,
+                    zIndex: 3,
+                    width: '100%',
+                    height: '100%',
+                    objectFit: 'cover',
+                    objectPosition: secondaryCropStyle.objectPosition,
+                    transform: `scale(${secondaryCropStyle.scale})`,
+                    filter: 'contrast(1.04) saturate(1.06)',
+                  }}
+                />
               )}
             </div>
+          ) : null}
 
-            {/* Bottom 30%: Speaker Face Cam */}
-            <div className="h-[30%] relative overflow-hidden bg-[#2B2620]">
-              <div className="absolute inset-0">
-                {renderRealVideoFeed(secondaryCropStyle, 'pip-face', true)}
-              </div>
-              <div className="relative z-10 p-3 flex items-center justify-between">
-                <span className="px-2.5 py-0.5 rounded-full bg-[#FAF7F2]/95 text-[#1F1C18] text-[11px] font-bold shadow">
-                  {activeKeyframe?.activeSpeaker || activeCut?.speaker || 'Speaker Face'}
-                </span>
-              </div>
+          {layout === 'SPLIT_TOP_BOTTOM' && (
+            <div className="relative z-10 p-3 flex items-center justify-between">
+              <span className="px-2.5 py-0.5 rounded-full bg-[#2D8A61] text-white text-[11px] font-bold shadow">
+                {activeKeyframe?.secondarySpeaker || 'Speaker 2'}
+              </span>
             </div>
-          </div>
-        )}
+          )}
+
+          {layout === 'CONTENT_ZOOM_PIP' && (
+            <div className="relative z-10 p-3 flex items-center justify-between">
+              <span className="px-2.5 py-0.5 rounded-full bg-[#FAF7F2]/95 text-[#1F1C18] text-[11px] font-bold shadow">
+                {activeKeyframe?.activeSpeaker || activeCut?.speaker || 'Speaker Face'}
+              </span>
+            </div>
+          )}
+        </div>
       </AbsoluteFill>
 
       {/* Optional Visual Cutaway Idea Pill */}
