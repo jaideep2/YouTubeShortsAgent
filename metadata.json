@@ -1,0 +1,6 @@
+{
+  "name": "ShortsDirector AI",
+  "description": "Multi-agent AI video editing pipeline that scouts viral moments, generates speaker-labeled millisecond transcripts, performs surgical filler cuts, and compiles 9:16 ShortEDL timelines.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

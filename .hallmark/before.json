@@ -1,0 +1,238 @@
+{
+ "v": 1,
+ "at": "2026-10-25T20:07:43.670Z",
+ "scope": "app",
+ "summary": {
+  "fails": 28,
+  "reflex": 31,
+  "warns": 7
+ },
+ "files": {
+  "src/App.tsx": {
+   "handlers": [
+    "onChange={(e) => setNicheHint(e.target.value)}",
+    "onChange={(e) => { setYoutubeUrl(e.target.value); if (inputValidationError) setInputValidationError(null); }}",
+    "onChange={handleFileChange}",
+    "onClick={() => handleLoadPreset(preset.id)}",
+    "onClick={() => handleRunPass1Scout()}",
+    "onClick={() => { setInputMode('UPLOAD'); setInputValidationError(null); }}",
+    "onClick={() => { setInputMode('YOUTUBE'); setInputValidationError(null); }}",
+    "onClick={handleExportActiveEdl}",
+    "onReapplySurgicalCuts={handleReapplySurgicalCuts}",
+    "onRestoreAllWords={handleRestoreAllWords}",
+    "onRetryFailedPass={handleRetryFailedPass}",
+    "onRunPass2ForCandidate={(cand) => handleRunPass2SurgicalCut(cand)}",
+    "onRunPass3AutoFraming={() => handleRunPass3AutoFraming(activeCandidate) }",
+    "onRunPass4QACritic={() => handleRunPass4QACritic(activeCandidate)}",
+    "onSelectCandidate={handleSelectCandidate}",
+    "onToggleCompoundGroup={handleToggleCompoundGroup}",
+    "onToggleSimulateError={handleToggleSimulateError}",
+    "onToggleWord={handleToggleWord}"
+   ],
+   "links": [
+    "#candidates-section",
+    "#preview-player-section",
+    "#source-ingest",
+    "#surgical-studio",
+    "#top"
+   ],
+   "fields": [],
+   "hooks": [],
+   "ids": [
+    "candidates-section",
+    "edl-contract",
+    "niche-hint-input",
+    "source-ingest",
+    "surgical-studio",
+    "video-file-input",
+    "youtube-url-input"
+   ],
+   "scripts": []
+  },
+  "src/main.tsx": {
+   "handlers": [],
+   "links": [],
+   "fields": [],
+   "hooks": [],
+   "ids": [],
+   "scripts": []
+  },
+  "src/components/CandidateListPanel.tsx": {
+   "handlers": [
+    "onClick={() => onRunPass2ForCandidate(cand)}",
+    "onClick={() => onSelectCandidate(cand)}",
+    "onClick={() => setStructureFilter('ALL')}",
+    "onClick={() => setStructureFilter('COLLAGE_STITCH')}",
+    "onClick={() => setStructureFilter('CONTINUOUS_TAKE')}"
+   ],
+   "links": [
+    "{src.url}"
+   ],
+   "fields": [],
+   "hooks": [],
+   "ids": [],
+   "scripts": []
+  },
+  "src/components/EdlAndTimelineInspector.tsx": {
+   "handlers": [
+    "onClick={() => setActiveTab('DYNAMIC_CAPTIONS')}",
+    "onClick={() => setActiveTab('EDL_JSON')}",
+    "onClick={() => setActiveTab('FINE_TIMELINE')}",
+    "onClick={handleCopyJson}",
+    "onClick={handleDownloadJson}"
+   ],
+   "links": [],
+   "fields": [],
+   "hooks": [
+    "live-edl-json"
+   ],
+   "ids": [],
+   "scripts": []
+  },
+  "src/components/PipelineStatusBar.tsx": {
+   "handlers": [
+    "onClick={onRetryFailedPass}",
+    "onClick={onToggleSimulateError}"
+   ],
+   "links": [],
+   "fields": [],
+   "hooks": [],
+   "ids": [],
+   "scripts": []
+  },
+  "src/components/ShortsVerticalPreviewPlayer.tsx": {
+   "handlers": [
+    "onChange={(e) => { setIsPlaying(false); setPlayheadMs(Number(e.target.value)); }}",
+    "onClick={() => setIsPlaying((p) => !p)}",
+    "onClick={() => setLayoutOverride('AUTO')}",
+    "onClick={() => setLayoutOverride('CONTENT_ZOOM_PIP')}",
+    "onClick={() => setLayoutOverride('SINGLE_SPEAKER')}",
+    "onClick={() => setLayoutOverride('SPLIT_TOP_BOTTOM')}",
+    "onClick={() => { setIsPlaying(false); setPlayheadMs(0); }}",
+    "onClick={() => { setIsPlaying(false); setPlayheadMs(br.startMs + 100); }}",
+    "onClick={() => { setIsPlaying(false); setPlayheadMs(c.timelineStartMs + 20); }}",
+    "onClick={() => { setIsPlaying(false); setPlayheadMs(fk.startMs + 30); }}",
+    "onClick={handleStepNextCut}",
+    "onClick={onRunPass3AutoFraming}",
+    "onClick={onRunPass4QACritic}"
+   ],
+   "links": [],
+   "fields": [],
+   "hooks": [
+    "broll-cue-overlay",
+    "dynamic-caption-box",
+    "hook-banner-overlay",
+    "shorts-916-viewport"
+   ],
+   "ids": [
+    "preview-player-section",
+    "shorts-timeline-scrubber"
+   ],
+   "scripts": []
+  },
+  "src/components/SurgicalTranscriptEditor.tsx": {
+   "handlers": [
+    "onClick={() => onToggleCompoundGroup(cg.groupId)}",
+    "onClick={() => onToggleWord(w.id)}",
+    "onClick={() => setHighlightMode('ALL')}",
+    "onClick={() => setHighlightMode('FILLERS_ONLY')}",
+    "onClick={() => setHighlightMode('VOCAL_EVENTS')}",
+    "onClick={onReapplySurgicalCuts}",
+    "onClick={onRestoreAllWords}"
+   ],
+   "links": [],
+   "fields": [],
+   "hooks": [
+    "live-kept-words",
+    "live-net-duration"
+   ],
+   "ids": [],
+   "scripts": []
+  }
+ },
+ "wiring": {
+  "handlers": [
+   "onChange={(e) => setNicheHint(e.target.value)}",
+   "onChange={(e) => { setIsPlaying(false); setPlayheadMs(Number(e.target.value)); }}",
+   "onChange={(e) => { setYoutubeUrl(e.target.value); if (inputValidationError) setInputValidationError(null); }}",
+   "onChange={handleFileChange}",
+   "onClick={() => handleLoadPreset(preset.id)}",
+   "onClick={() => handleRunPass1Scout()}",
+   "onClick={() => onRunPass2ForCandidate(cand)}",
+   "onClick={() => onSelectCandidate(cand)}",
+   "onClick={() => onToggleCompoundGroup(cg.groupId)}",
+   "onClick={() => onToggleWord(w.id)}",
+   "onClick={() => setActiveTab('DYNAMIC_CAPTIONS')}",
+   "onClick={() => setActiveTab('EDL_JSON')}",
+   "onClick={() => setActiveTab('FINE_TIMELINE')}",
+   "onClick={() => setHighlightMode('ALL')}",
+   "onClick={() => setHighlightMode('FILLERS_ONLY')}",
+   "onClick={() => setHighlightMode('VOCAL_EVENTS')}",
+   "onClick={() => setIsPlaying((p) => !p)}",
+   "onClick={() => setLayoutOverride('AUTO')}",
+   "onClick={() => setLayoutOverride('CONTENT_ZOOM_PIP')}",
+   "onClick={() => setLayoutOverride('SINGLE_SPEAKER')}",
+   "onClick={() => setLayoutOverride('SPLIT_TOP_BOTTOM')}",
+   "onClick={() => setStructureFilter('ALL')}",
+   "onClick={() => setStructureFilter('COLLAGE_STITCH')}",
+   "onClick={() => setStructureFilter('CONTINUOUS_TAKE')}",
+   "onClick={() => { setInputMode('UPLOAD'); setInputValidationError(null); }}",
+   "onClick={() => { setInputMode('YOUTUBE'); setInputValidationError(null); }}",
+   "onClick={() => { setIsPlaying(false); setPlayheadMs(0); }}",
+   "onClick={() => { setIsPlaying(false); setPlayheadMs(br.startMs + 100); }}",
+   "onClick={() => { setIsPlaying(false); setPlayheadMs(c.timelineStartMs + 20); }}",
+   "onClick={() => { setIsPlaying(false); setPlayheadMs(fk.startMs + 30); }}",
+   "onClick={handleCopyJson}",
+   "onClick={handleDownloadJson}",
+   "onClick={handleExportActiveEdl}",
+   "onClick={handleStepNextCut}",
+   "onClick={onReapplySurgicalCuts}",
+   "onClick={onRestoreAllWords}",
+   "onClick={onRetryFailedPass}",
+   "onClick={onRunPass3AutoFraming}",
+   "onClick={onRunPass4QACritic}",
+   "onClick={onToggleSimulateError}",
+   "onReapplySurgicalCuts={handleReapplySurgicalCuts}",
+   "onRestoreAllWords={handleRestoreAllWords}",
+   "onRetryFailedPass={handleRetryFailedPass}",
+   "onRunPass2ForCandidate={(cand) => handleRunPass2SurgicalCut(cand)}",
+   "onRunPass3AutoFraming={() => handleRunPass3AutoFraming(activeCandidate) }",
+   "onRunPass4QACritic={() => handleRunPass4QACritic(activeCandidate)}",
+   "onSelectCandidate={handleSelectCandidate}",
+   "onToggleCompoundGroup={handleToggleCompoundGroup}",
+   "onToggleSimulateError={handleToggleSimulateError}",
+   "onToggleWord={handleToggleWord}"
+  ],
+  "links": [
+   "#candidates-section",
+   "#preview-player-section",
+   "#source-ingest",
+   "#surgical-studio",
+   "#top",
+   "{src.url}"
+  ],
+  "fields": [],
+  "hooks": [
+   "broll-cue-overlay",
+   "dynamic-caption-box",
+   "hook-banner-overlay",
+   "live-edl-json",
+   "live-kept-words",
+   "live-net-duration",
+   "shorts-916-viewport"
+  ],
+  "ids": [
+   "candidates-section",
+   "edl-contract",
+   "niche-hint-input",
+   "preview-player-section",
+   "shorts-timeline-scrubber",
+   "source-ingest",
+   "surgical-studio",
+   "video-file-input",
+   "youtube-url-input"
+  ]
+ },
+ "scripts": {},
+ "pages": {}
+}
