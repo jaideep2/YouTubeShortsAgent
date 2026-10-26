@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Film,
   Loader2,
+  Play,
   RotateCcw,
   Scissors,
   Sparkles,
@@ -26,6 +27,9 @@ interface ConsoleHeaderAndTelemetryProps {
   onSelectCandidate: (id: string) => void;
   onRetryFailedPass: () => void;
   onRunPass: (passId: PipelinePassId) => void;
+  onResetStudio: () => void;
+  onLoadTestRun: () => void;
+  isTestMode: boolean;
 }
 
 const PASS_ORDER: PipelinePassId[] = [
@@ -94,6 +98,9 @@ export const ConsoleHeaderAndTelemetry: React.FC<ConsoleHeaderAndTelemetryProps>
   selectedCandidate,
   onSelectCandidate,
   onRetryFailedPass,
+  onResetStudio,
+  onLoadTestRun,
+  isTestMode,
 }) => {
   const activePass = pipelineStatus.currentPass;
   const isAnyRunning = Boolean(activePass);
@@ -110,7 +117,7 @@ export const ConsoleHeaderAndTelemetry: React.FC<ConsoleHeaderAndTelemetryProps>
 
   return (
     <header className="sticky top-0 z-[300] bg-[#FAF7F2]/95 backdrop-blur-md border-b border-[#E8E0D2]">
-      <div className="max-w-[1380px] mx-auto px-4 lg:px-8 py-3.5 flex flex-wrap items-center justify-between gap-4">
+      <div className="max-w-[1380px] mx-auto px-4 lg:px-8 py-3.5 flex flex-wrap items-center justify-between gap-3">
         {/* Brand Identity: YouTubeShortsAgent */}
         <NavLink to="/drop" className="flex items-center gap-3 group">
           <div className="w-10 h-10 rounded-2xl bg-[#E05A47] text-white flex items-center justify-center shadow-[0_6px_16px_-4px_rgba(224,90,71,0.5)] group-hover:scale-105 transition-transform">
@@ -170,15 +177,41 @@ export const ConsoleHeaderAndTelemetry: React.FC<ConsoleHeaderAndTelemetryProps>
           })}
         </nav>
 
-        {/* Active Story Switcher Pill */}
-        <div className="flex items-center gap-2.5">
-          {candidates.length > 0 && selectedCandidate ? (
-            <div className="flex items-center gap-2.5 bg-[#F3EDE2] border border-[#E8E0D2] rounded-full px-3.5 py-1.5">
+        {/* Always-Visible Reset & Test Buttons + Active Story Switcher */}
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={onResetStudio}
+            disabled={isAnyRunning}
+            title="Reset video and generated Shorts to start a clean run"
+            className="px-3.5 py-1.5 rounded-full bg-[#FAF7F2] border-2 border-[#1F1C18] text-xs font-bold text-[#1F1C18] hover:bg-[#E05A47] hover:text-white hover:border-[#E05A47] transition-all flex items-center gap-1.5 cursor-pointer shadow-2xs"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            <span>Reset</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onLoadTestRun}
+            disabled={isAnyRunning}
+            title="Pre-populate https://www.youtube.com/watch?v=lggpuoaP_C8 and all 4 Shorts for a <1 min demo"
+            className={`px-3.5 py-1.5 rounded-full border-2 text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-2xs ${
+              isTestMode && candidates.length > 0
+                ? 'bg-[#2D8A61] border-[#1F1C18] text-white'
+                : 'bg-[#F59E0B] border-[#1F1C18] text-[#1F1C18] hover:bg-[#D97706] hover:text-white'
+            }`}
+          >
+            <Play className="w-3.5 h-3.5" />
+            <span>Test</span>
+          </button>
+
+          {candidates.length > 0 && selectedCandidate && (
+            <div className="flex items-center gap-2 bg-[#F3EDE2] border border-[#E8E0D2] rounded-full px-3 py-1.5">
               <select
                 aria-label="Picked Story Moment"
                 value={selectedCandidate.id}
                 onChange={(e) => onSelectCandidate(e.target.value)}
-                className="bg-transparent text-xs text-[#1F1C18] font-semibold focus:outline-none cursor-pointer max-w-[175px] truncate"
+                className="bg-transparent text-xs text-[#1F1C18] font-semibold focus:outline-none cursor-pointer max-w-[155px] truncate"
               >
                 {candidates.map((c, idx) => (
                   <option key={c.id} value={c.id} className="bg-[#FAF7F2] text-[#1F1C18]">
@@ -187,25 +220,9 @@ export const ConsoleHeaderAndTelemetry: React.FC<ConsoleHeaderAndTelemetryProps>
                 ))}
               </select>
 
-              <div className="h-4 w-[1px] bg-[#D8CEBE]" />
-
-              <div className="flex items-center gap-1.5 text-xs">
-                <motion.span
-                  key={selectedCandidate.estimatedNetDurationSec ?? 40}
-                  initial={{ scale: 0.85, opacity: 0.5 }}
-                  animate={{ scale: 1, opacity: 1 }}
-                  className="px-2 py-0.5 rounded-full bg-[#2D8A61] text-white font-bold mono-code"
-                >
-                  {(selectedCandidate.estimatedNetDurationSec ?? 40).toFixed(0)}s Short
-                </motion.span>
-                <span className="text-[#786F63] text-[11px] hidden xl:inline">
-                  from {formatSecondsToMMSS(selectedCandidate.rawSourceDurationSec ?? 180)}
-                </span>
-              </div>
-            </div>
-          ) : (
-            <div className="text-xs font-medium text-[#786F63] px-3.5 py-1.5 rounded-full bg-[#F3EDE2] border border-[#E8E0D2]">
-              Ready for your video
+              <span className="px-2 py-0.5 rounded-full bg-[#2D8A61] text-white text-xs font-bold mono-code">
+                {(selectedCandidate.estimatedNetDurationSec ?? 40).toFixed(0)}s
+              </span>
             </div>
           )}
         </div>

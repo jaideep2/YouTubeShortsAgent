@@ -51,6 +51,22 @@ export interface ClientAgentChatRequest {
   selectedMomentIndex?: number;
 }
 
+async function parseJsonResponse(res: Response, fallbackLabel: string): Promise<any> {
+  const rawText = await res.text();
+  let data: any = null;
+  try {
+    data = rawText ? JSON.parse(rawText) : {};
+  } catch {
+    throw new Error(
+      `${fallbackLabel} timed out or returned an unexpected response (${res.status}).`
+    );
+  }
+  if (!res.ok) {
+    throw new Error(data?.error || `${fallbackLabel} failed (${res.status})`);
+  }
+  return data;
+}
+
 export async function requestTrendRadar(
   payload: ClientTrendRadarRequest
 ): Promise<TrendRadarResult> {
@@ -60,10 +76,7 @@ export async function requestTrendRadar(
     body: JSON.stringify(payload),
   });
 
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || `Trend check failed (${res.status})`);
-  }
+  const data = await parseJsonResponse(res, 'Trend check');
   return data.radar as TrendRadarResult;
 }
 
@@ -76,10 +89,7 @@ export async function requestScoutCandidates(
     body: JSON.stringify(payload),
   });
 
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || `Moment Finder failed (${res.status})`);
-  }
+  const data = await parseJsonResponse(res, 'Moment Finder');
   return data.candidates as ShortEDL[];
 }
 
@@ -92,10 +102,7 @@ export async function requestSurgicalCut(
     body: JSON.stringify(payload),
   });
 
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || `Fluff Snipper failed (${res.status})`);
-  }
+  const data = await parseJsonResponse(res, 'Fluff Snipper');
   return data.candidate as ShortEDL;
 }
 
@@ -108,10 +115,7 @@ export async function requestAutoFraming(
     body: JSON.stringify(payload),
   });
 
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || `Camera & Hook Styler failed (${res.status})`);
-  }
+  const data = await parseJsonResponse(res, 'Camera & Hook Styler');
   return data.candidate as ShortEDL;
 }
 
@@ -124,27 +128,35 @@ export async function requestQACritic(
     body: JSON.stringify(payload),
   });
 
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || `Quality Polish failed (${res.status})`);
-  }
+  const data = await parseJsonResponse(res, 'Quality Polish');
   return data.candidate as ShortEDL;
 }
 
 export async function requestCloudVideoExport(
   payload: ClientCloudExportRequest
 ): Promise<CloudExportResult> {
-  const res = await fetch('/api/agents/export-short', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
+  try {
+    const res = await fetch('/api/agents/export-short', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
 
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || `Cloud Export failed (${res.status})`);
+    const data = await parseJsonResponse(res, 'MP4 Download');
+    return data.exportResult as CloudExportResult;
+  } catch (err) {
+    // If Live Mode hit an upstream proxy timeout, immediately fall back to the <1s fast render path
+    if (!payload.fastTestMode) {
+      const retryRes = await fetch('/api/agents/export-short', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...payload, fastTestMode: true }),
+      });
+      const retryData = await parseJsonResponse(retryRes, 'MP4 Download');
+      return retryData.exportResult as CloudExportResult;
+    }
+    throw err;
   }
-  return data.exportResult as CloudExportResult;
 }
 
 export async function requestAgentChat(
@@ -156,11 +168,9 @@ export async function requestAgentChat(
     body: JSON.stringify(payload),
   });
 
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || `Agent chat failed (${res.status})`);
-  }
+  const data = await parseJsonResponse(res, 'Agent chat');
   return data as AgentChatResponse;
 }
+
 
 

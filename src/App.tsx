@@ -792,6 +792,9 @@ function StudioShell() {
         onSelectCandidate={(id) => setSelectedCandidateId(id)}
         onRetryFailedPass={handleRetryFailedPass}
         onRunPass={handleRunSinglePass}
+        onResetStudio={handleResetStudio}
+        onLoadTestRun={handleLoadTestRun}
+        isTestMode={isTestMode}
       />
 
       <main className="flex-1 pb-20">
@@ -896,16 +899,14 @@ function StudioShell() {
         </Routes>
       </main>
 
-      {/* Floating Agent Chat Drawer on /moments, /snip, and /shine */}
-      {!isDropRoute && (
-        <AgentChatPanel
-          messages={chatMessages}
-          suggestedPrompts={suggestedPrompts}
-          isSending={isSendingChat}
-          onSendMessage={handleSendChatMessage}
-          variant="floating"
-        />
-      )}
+      {/* Floating Agent Chat Drawer in lower-right corner on all pages */}
+      <AgentChatPanel
+        messages={chatMessages}
+        suggestedPrompts={suggestedPrompts}
+        isSending={isSendingChat}
+        onSendMessage={handleSendChatMessage}
+        variant="floating"
+      />
     </div>
   );
 }

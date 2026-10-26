@@ -367,7 +367,7 @@ export const StagePage: React.FC<StagePageProps> = ({
       return result;
     } catch (err: any) {
       setCloudExportError(
-        err?.message || 'Could not export your Short in the cloud. Please try again.'
+        err?.message || 'Could not download your Short MP4. Please try again.'
       );
       return null;
     } finally {
@@ -646,7 +646,7 @@ export const StagePage: React.FC<StagePageProps> = ({
             {isExportingCloud ? (
               <>
                 <Loader2 className="w-4 h-4 animate-spin" />
-                <span>Exporting MP4...</span>
+                <span>Downloading MP4...</span>
               </>
             ) : (
               <>
@@ -912,7 +912,8 @@ export const StagePage: React.FC<StagePageProps> = ({
                   onClick={() => void handleRunCloudExport()}
                   className="btn btn--primary py-1.5 px-4 text-xs"
                 >
-                  Try Export Again
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Download MP4</span>
                 </button>
               </div>
             )}

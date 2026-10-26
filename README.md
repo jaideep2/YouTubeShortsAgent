@@ -6,56 +6,79 @@ Designed with a warm, tactile **Hallmark "Hum" aesthetic** for everyday content 
 
 ---
 
-## Hybrid Agent Architecture (7 Agents Total)
+## Repository Structure
 
-Under the hood, **YouTubeShortsAgent** uses a **Hybrid Agent Architecture** powered by `@google/genai` (`models/gemini-4-argon` across the pipeline):
-- **6 Fast Pipeline Agents (`ai.models.generateContent`)** for real-time interactive discovery, transcript cleanup, 9:16 auto-framing, quality checks, and conversational control.
-- **1 Cloud Sandbox Managed Agent (`ai.agents.create` + `ai.interactions.create` with `base_agent: "antigravity-preview-09-2026"`, `environment: "remote"`)** that spins up an isolated cloud Linux VM to run `ffmpeg` and render the final downloadable MP4 binary.
-
-### Summary Table of Agents
-
-| # | Agent Name | Function / Endpoint | SDK Pattern & Model | Thinking / Grounding | What It Does |
-|---|---|---|---|---|---|
-| **1** | **Weekly Trend Radar Agent** | `runTrendRadarAgent`<br>`POST /api/trends/radar` | `ai.models.generateContent`<br>`gemini-4-argon` | `thinkingLevel: "LOW"` + `tools: [{ googleSearch: {} }]` | Scans live YouTube Shorts trends in the creator's niche and surfaces 3 trending hook formulas and story formats. |
-| **2** | **Moment Finder & Story Stitcher Agent (Pass 1)** | `runTrendAndScoutAgent`<br>`POST /api/agents/scout` | `ai.models.generateContent`<br>`gemini-4-argon` | Multimodal `fileData` (YouTube URI or uploaded MP4) + `thinkingLevel: "HIGH"` | Watches the full source video, finds the top 3 viral story moments (`30s–60s`), stitches non-contiguous setups & payoffs while skipping boring middle tangents, and generates initial 9:16 framing + YouTube metadata. |
-| **3** | **Fluff & Pause Snipper Agent (Pass 2)** | `runEnhancedSurgicalCutAgent`<br>`POST /api/agents/surgical-cut` | `ai.models.generateContent`<br>`gemini-4-argon` | Multimodal `fileData` + `thinkingLevel: "LOW"` + deterministic compiler | Extracts word-by-word speaker diarization with millisecond timestamps, flags simple fillers (*"umm"*, *"uh"*) and rambling compound phrases (*"and the thing is"*), tightens dead-air pauses, and pads audio cuts by `±35ms` for smooth transitions. |
-| **4** | **9:16 Smart Auto-Framing & Packaging Agent (Pass 3)** | `runAutoFramingAndPackagingAgent`<br>`POST /api/agents/auto-frame` | `ai.models.generateContent`<br>`gemini-4-argon` | `thinkingLevel: "LOW"` + strict JSON schema | Generates dynamic 9:16 camera crop keyframes (`SINGLE_SPEAKER`, `SPLIT_TOP_BOTTOM` 50/50 for 2 speakers, `CONTENT_ZOOM_PIP` 70/30 for screen share + face), 3-second opening hook stickers, karaoke caption groups, and YouTube Shorts Title/Description/Hashtags. |
-| **5** | **Quality Polish & Self-Healing Critic Agent (Pass 4)** | `runQACriticAndSelfHealAgent`<br>`POST /api/agents/qa-critic` | `ai.models.generateContent`<br>`gemini-4-argon` | `thinkingLevel: "LOW"` + deterministic self-heal | Audits net duration (`28s–58s`), heals jarring micro-cuts (`<450ms`), verifies audio zero-crossing padding, and ensures natural pacing. |
-| **6** | **Conversational Studio Chat Agent** | `runCreatorStudioChatAgent`<br>`POST /api/agent/chat` | `ai.models.generateContent`<br>`gemini-4-argon` | `thinkingLevel: "LOW"` + structured action schema | Front-and-center chat assistant that translates natural language requests (*"Find Shorts from this link"*, *"Switch camera to Top & Bottom split"*, *"Remove filler words"*, *"Rewrite title"*) into live studio actions (`LOAD_YOUTUBE_URL`, `SET_CAMERA_MODE`, `TOGGLE_FILLERS`, `TOGGLE_PAUSES`, `UPDATE_METADATA`, `NAVIGATE_STEP`). |
-| **7** | **Cloud Sandbox MP4 Export Agent (Managed Agent)** | `runCloudVideoExportAgent`<br>`POST /api/agents/export-short` | `ai.agents.create` + `ai.interactions.create`<br>`base_agent: "antigravity-preview-09-2026"` | `environment: "remote"` (Cloud Linux VM + `ffmpeg`) | Provisions a remote Linux container, executes `ffmpeg` to stitch kept story beats, crop to `1080x1920` (9:16), burn in the 3-second hook banner, and return the base64-encoded MP4 binary for download or direct upload to YouTube. |
+```text
+/
+├── server.ts                              # Express + Vite full-stack server; mounts /api/trends/* & /api/agents/* routes and warms the Cloud Export sandbox on boot
+├── firebase-applet-config.json            # Google / Firebase OAuth client configuration (used for YouTube Data API v3 direct upload)
+├── metadata.json                          # AI Studio applet metadata & capabilities
+├── package.json                           # Scripts (dev, build, start) & dependencies (@google/genai, @remotion/player, express, lucide-react)
+└── src/
+    ├── App.tsx                            # Root state machine: manages 4-pass pipeline, Test/Reset demo state, sessionStorage persistence, and chat action dispatcher
+    ├── main.tsx                           # React 19 entry point
+    ├── tokens.css / base.css / index.css  # Hallmark "Hum" warm design tokens (Warm Alabaster #FAF7F2, Oatmeal #F3EDE2, Coral #E05A47, Meadow #2D8A61)
+    ├── types/
+    │   └── edl.ts                         # Complete TypeScript Edit Decision List (EDL) schema, 9:16 FramingKeyframe types, YouTube metadata & Agent Chat action types
+    ├── data/
+    │   └── hackathonTestRun.ts            # Pre-populated full run for https://www.youtube.com/watch?v=lggpuoaP_C8 (4 Moments, word-level transcripts, 9:16 framing, YouTube metadata)
+    ├── services/
+    │   ├── shortsAgents.ts                # ALL 7 AI Agents: prompts, tools, JSON response schemas, warm antigravity-preview-09-2026 sandbox manager, and ffmpeg MP4 renderer
+    │   └── clientApi.ts                   # Frontend API client for /api/trends/radar and /api/agents/* with safe JSON parsing & automatic fast-export fallback
+    ├── utils/
+    │   ├── edlCompiler.ts                 # Deterministic EDL compiler: filler/pause detection, ±35ms audio zero-crossing padding, 9:16 crop presets, QA self-healing
+    │   └── edlCompiler.test.ts            # 9-suite Node unit test runner (`npx tsx --test src/utils/edlCompiler.test.ts`)
+    ├── remotion/
+    │   └── ShortComposition.tsx           # Frame-accurate 30fps Remotion composition for 9:16 / 1:1 preview (Single Speaker, 50/50 Top-Bottom Split, 70/30 Screen+Face, Hook Sticker, Karaoke Captions)
+    ├── components/
+    │   ├── ConsoleHeaderAndTelemetry.tsx  # Sticky top navigation bar with 4 step pills, always-visible Reset & Test buttons, and active moment selector
+    │   ├── AgentChatPanel.tsx             # Conversational Studio Agent UI (Hero mode on /drop + floating drawer across /moments, /snip, /shine)
+    │   ├── RealVideoPlayer.tsx            # Click-to-play 9:16 reframed video player (dual-synchronized YouTube IFrame & HTML5 <video> with playsInline + muted compliance)
+    │   └── UltravioletTooltip.tsx         # Tactile creator helper tooltips
+    └── pages/
+        ├── DropPage.tsx                   # Step 1 (/drop): Reset & Test demo bar, Weekly YouTube Trend Radar, Hero Chat Assistant, YouTube URL / MP4 dropzone
+        ├── ScoutPage.tsx                  # Step 2 (/moments): Scrollable vertical feed of all reframed 9:16 Shorts + 1-tap Story Flow pills (Setup → Skipped Tangent → Payoff)
+        ├── SplitPage.tsx                  # Step 3 (/snip): Clean filler & pause summary ("12 filler words • 13 pauses"), 1-tap bulk toggles, and optional word-by-word drawer
+        └── StagePage.tsx                  # Step 4 (/shine): 9:16 Remotion preview, camera mode switcher, editable Hook Sticker, YouTube Title/Description/Hashtags, Download MP4, and Upload to YouTube OAuth modal
+```
 
 ---
 
-## How Each Agent Works in the 4-Step Creator Flow
+## Hybrid Agent Architecture (7 Agents Total)
 
-### Step 1: Drop a Video (`/drop`)
-- **Weekly Trend Radar Agent (`runTrendRadarAgent`)** runs at the top of the screen using Google Search grounding (`tools: [{ googleSearch: {} }]`) with `thinkingLevel: "LOW"` for fast turnaround, showing 3 actionable YouTube Shorts hook formulas trending this week.
-- **Conversational Studio Chat Agent (`runCreatorStudioChatAgent`)** sits front and center so creators can paste a YouTube URL or ask the agent to frame, trim, or title their Short directly in chat.
-- Creators can also paste any YouTube URL or drag-and-drop an `.mp4` / `.mpeg` recording into the dropzone.
+All 7 agents are implemented in **[`src/services/shortsAgents.ts`](src/services/shortsAgents.ts)** and exposed via Express routes in **[`server.ts`](server.ts)**.
 
-### Step 2: Pick a Moment (`/moments`)
-- **Moment Finder & Story Stitcher Agent (`runTrendAndScoutAgent`)** ingests the full video via `fileData: { fileUri, mimeType: "video/mp4" }` with `thinkingLevel: "HIGH"` so the model deeply reasons over narrative arcs.
-- It identifies 3 candidate Shorts, choosing between:
-  - **One Smooth Take (`CONTINUOUS_TAKE`)**: A single uninterrupted highlight.
-  - **Stitched Story (`COLLAGE_STITCH`)**: Combines a setup (`[02:10–02:28]`) and payoff (`[04:48–05:15]`) while automatically skipping a boring middle tangent (`[02:28–04:48]`).
-- Every moment is displayed in a scrollable vertical feed showing **only the 9:16 Reframed Output** (paused on load, playing with real sound when clicked) and simple 1-tap **Story Flow** pills.
+### Table of Agents — Files, Prompts, Tools & Configurations
 
-### Step 3: Snip the Fluff (`/snip`)
-- **Fluff & Pause Snipper Agent (`runEnhancedSurgicalCutAgent`)** analyzes the selected story's audio/video segment (`thinkingLevel: "LOW"`) and pairs with our deterministic EDL compiler (`src/utils/edlCompiler.ts`) to:
-  - Detect simple filler words (*"umm"*, *"uh"*, *"erm"*) and multi-word rambling phrases (*"and the thing is"*, *"you know what I mean"*).
-  - Count natural speech pauses (`>= 260ms` gaps) and tighten dead air.
-  - Apply `±35ms` audio zero-crossing padding (`AUDIO_PADDING_MS = 35`) around every cut so words never sound clipped.
-- Instead of overwhelming the creator with a wall of crossed-out text, the UI presents a clean summary card (**e.g., `12 filler words • 13 pauses`**) with two 1-tap toggle buttons (**Filler Words Removed** and **Pauses Tightened**), plus an optional collapsible word-by-word drawer.
+| # | Agent Name | Source File & Function | Express Route | Model & SDK Method | Tools & Response Schema | Prompt Location & Purpose |
+|---|---|---|---|---|---|---|
+| **1** | **Weekly Trend Radar Agent** | `src/services/shortsAgents.ts`<br>`runTrendRadarAgent()`<br>*(lines 277–356)* | `POST /api/trends/radar`<br>(`server.ts` line 29) | `gemini-4-argon`<br>`ai.interactions.create`<br>`thinking_level: "low"` | **Tools:** `[{ type: "google_search" }]`<br>**Output:** Structured JSON (`weeklyPulseSummary`, `trendingTopics[]`, `sources[]`) | **Prompt:** `shortsAgents.ts` lines 284–308.<br>Researches live YouTube Shorts hooks, pacing formats, and retention triggers trending this week in the creator's niche. |
+| **2** | **Moment Finder & Story Stitcher Agent (Pass 1)** | `src/services/shortsAgents.ts`<br>`runTrendAndScoutAgent()`<br>*(lines 363–655)* | `POST /api/agents/scout`<br>(`server.ts` line 42) | `gemini-4-argon`<br>`ai.interactions.create`<br>`thinking_level: "high"` | **Input:** Multimodal `video` (`fileUri` / YouTube URL)<br>**Tools:** `[{ type: "google_search" }, { type: "url_context" }]`<br>**Schema:** `scoutResponseSchema` *(lines 408–503)* | **Prompt:** `shortsAgents.ts` lines 373–406.<br>Watches the full episode, selects 3–4 high-retention story arcs (`30s–60s`), stitches non-contiguous setups & payoffs (`COLLAGE_STITCH`) to skip middle tangents, and generates initial 9:16 framing + YouTube metadata. |
+| **3** | **Fluff & Pause Snipper Agent (Pass 2)** | `src/services/shortsAgents.ts`<br>`runEnhancedSurgicalCutAgent()`<br>*(lines 661–843)* + `src/utils/edlCompiler.ts` | `POST /api/agents/surgical-cut`<br>(`server.ts` line 64) | `gemini-4-argon`<br>`ai.interactions.create`<br>`thinking_level: "low"` | **Input:** Multimodal `video` + kept `coarseSegments`<br>**Schema:** `surgicalResponseSchema` *(lines 697–736)*<br>**Compiler:** `annotateSurgicalFillers()` & `compileFineTimeline()` | **Prompt:** `shortsAgents.ts` lines 673–695.<br>Extracts word-level speaker diarization (`Speaker 1`, `Speaker 2`), flags simple fillers (*"umm"*, *"uh"*) and rambling compound phrases (*"and the thing is"*), counts pauses (`>= 260ms`), and pads cuts by `±35ms` (`AUDIO_PADDING_MS = 35`). |
+| **4** | **9:16 Smart Auto-Framing & Packaging Agent (Pass 3)** | `src/services/shortsAgents.ts`<br>`runAutoFramingAndPackagingAgent()`<br>*(lines 849–979)* | `POST /api/agents/auto-frame`<br>(`server.ts` line 83) | `gemini-4-argon`<br>`ai.interactions.create`<br>`thinking_level: "low"` | **Schema:** `framingResponseSchema` *(lines 873–932)*<br>**Compiler:** `buildSmartAutoFramingKeyframes()` & `buildYouTubePublishMetadata()` | **Prompt:** `shortsAgents.ts` lines 854–871.<br>Generates scene-by-scene 9:16 vertical camera layouts (`SINGLE_SPEAKER`, `SPLIT_TOP_BOTTOM` 50/50, `CONTENT_ZOOM_PIP` 70/30), 3-second opening Hook Sticker, B-roll ideas, and YouTube Shorts Title/Description/Hashtags. |
+| **5** | **Quality Polish & Self-Healing Critic Agent (Pass 4)** | `src/services/shortsAgents.ts`<br>`runQACriticAndSelfHealAgent()`<br>*(lines 985–1031)* | `POST /api/agents/qa-critic`<br>(`server.ts` line 99) | `gemini-4-argon`<br>`ai.interactions.create`<br>`thinking_level: "low"` | **Compiler Tool:** `runDeterministicQASelfHeal()` in `src/utils/edlCompiler.ts` *(lines 506–605)* | **Prompt:** `shortsAgents.ts` lines 996–1005.<br>Audits net duration (`28s–58s`), heals jarring micro-cuts (`<450ms`), verifies audio zero-crossing padding, and produces creator-friendly quality notes. |
+| **6** | **Conversational Studio Chat Agent** | `src/services/shortsAgents.ts`<br>`runCreatorStudioChatAgent()`<br>*(lines 1447–1575)* | `POST /api/agents/chat`<br>(`server.ts` line 139) | `gemini-4-argon`<br>`ai.interactions.create`<br>`thinking_level: "low"` | **Schema:** `chatResponseSchema` *(lines 1495–1536)*<br>**Action Dispatcher:** `applyChatActions()` in `src/App.tsx` *(lines 601–723)* | **Prompt:** `shortsAgents.ts` lines 1463–1493.<br>Translates natural language chat commands into structured studio actions (`LOAD_YOUTUBE_URL`, `RUN_PIPELINE`, `SELECT_MOMENT`, `SET_CAMERA_MODE`, `SET_ASPECT_RATIO`, `TOGGLE_FILLERS`, `TOGGLE_PAUSES`, `UPDATE_HOOK_TEXT`, `UPDATE_METADATA`, `NAVIGATE_STEP`). |
+| **7** | **Cloud Sandbox MP4 Export Agent (Managed Agent)** | `src/services/shortsAgents.ts`<br>`warmUpCloudExportSandbox()` & `runCloudVideoExportAgent()`<br>*(lines 1033–1419)* | `POST /api/agents/warm-export`<br>`POST /api/agents/export-short`<br>(`server.ts` lines 115–137) | `agent: "antigravity-preview-09-2026"`<br>`environment: "remote"` (reuses warm `environmentId` + `previous_interaction_id`)<br>`model: "gemini-3.5-flash-lite"` | **Tools:** `[{ type: "code_execution" }]` (`max_total_tokens: "15000"`) + `/usr/bin/ffmpeg` (`renderRealShortMp4Binary()`, lines 1093–1215) | **Prompts:**<br>• Warm-up (`line 1057`): `Run ffmpeg -version \| head -n 1 in bash to warm up the video export sandbox`<br>• Export (`lines 1295–1297`): Executes `ffmpeg` (`libx264 -preset ultrafast`, `aac`, `720x1280` 9:16 crop + burned-in 3s Amber Hook Sticker) to produce the downloadable `.mp4`. |
 
-### Step 4: Make it Shine & Upload to YouTube (`/shine`)
-- **9:16 Smart Auto-Framing & Packaging Agent (`runAutoFramingAndPackagingAgent`)** and **Quality Polish Agent (`runQACriticAndSelfHealAgent`)** configure the final vertical Short inside the live **Remotion `<Player />`**:
-  - **1 Speaker (`SINGLE_SPEAKER`)**: Centers the active speaker in 9:16.
-  - **Top & Bottom Split (`SPLIT_TOP_BOTTOM`)**: Stacks Speaker 1 (top 50%) and Speaker 2 (bottom 50%) when two people are conversing.
-  - **Screen Share + Face (`CONTENT_ZOOM_PIP`)**: Zooms into shared content on the top 70% while keeping the speaker's face on the bottom 30%.
-- Generates copy-ready **YouTube Shorts Title** (`<= 100 chars` with `#Shorts`), **Description**, and **Hashtags**.
-- **Cloud Sandbox MP4 Export Agent (`runCloudVideoExportAgent`)** & **Direct YouTube Upload**:
-  - Clicking **Download MP4** or **Upload to YouTube** invokes the **Sandbox Managed Agent** (`antigravity-preview-09-2026` in `remote` mode) to assemble the 9:16 MP4 binary via `ffmpeg`.
-  - Clicking **Upload to YouTube** opens the OAuth confirmation modal (`youtube.upload` and `youtube.readonly` scopes) so creators can sign in with Google, choose visibility (*Unlisted*, *Private*, or *Public*), and publish directly to their YouTube channel via the YouTube Data API v3 resumable upload protocol.
+---
+
+## Detailed Breakdown of Agent Prompts, Schemas & Tools
+
+### 1. Where are the Agent Prompts?
+Every agent prompt is co-located with its agent runner in **`src/services/shortsAgents.ts`**:
+- **Trend Radar Prompt (`lines 284–308`)**: Instructs `gemini-4-argon` to search live YouTube Shorts hooks in the user's niche and output 3 concrete hook formulas (`COLLAGE_STITCH` vs `CONTINUOUS_TAKE`).
+- **Moment Finder & Story Stitcher Prompt (`lines 373–406`)**: Instructs `gemini-4-argon` (`thinking_level: "high"`) to act as an expert podcast/video editor, find 3–4 story moments (`30s–60s`), stitch setups and payoffs while marking middle tangents as `action: "SKIP"`, and assign 9:16 layout modes (`SINGLE_SPEAKER`, `SPLIT_TOP_BOTTOM`, `CONTENT_ZOOM_PIP`).
+- **Surgical Cut Prompt (`lines 673–695`)**: Instructs `gemini-4-argon` (`thinking_level: "low"`) to produce word-accurate diarized transcripts, tag `SIMPLE_FILLER` (*"umm"*, *"uh"*) and `COMPOUND_FLUFF` (*"and the thing is"*), and preserve `[LAUGHTER]` reactions.
+- **Auto-Framing & Packaging Prompt (`lines 854–871`)**: Instructs `gemini-4-argon` to generate 9:16 camera keyframes with normalized crop boxes (`[ymin, xmin, ymax, xmax]` in `0..1000`), a 3-second hook banner, B-roll cues, and YouTube Shorts Title/Description/Hashtags.
+- **Conversational Studio Chat Prompt (`lines 1463–1493`)**: Gives the assistant awareness of the current route, loaded YouTube URL, candidate list, and active moment so it can emit structured UI actions alongside its natural-language reply.
+- **Cloud Sandbox Export Prompt (`lines 1057` & `1295–1297`)**: Drives the `antigravity-preview-09-2026` remote Linux sandbox to run `ffmpeg` without streaming 150KB of base64 text through LLM tokens.
+
+### 2. Where are the Deterministic Editing Tools (`src/utils/edlCompiler.ts`)?
+To guarantee frame-accurate playback and zero-flicker audio/video transitions, the LLM agents pair with deterministic TypeScript compilers in **`src/utils/edlCompiler.ts`**:
+- **`annotateSurgicalFillers()` (`lines 67–156`)**: Enforces word-level filler and compound-phrase tagging and computes `AUDIO_PADDING_MS = 35` (`±35ms` audio zero-crossing padding).
+- **`compileFineTimeline()` (`lines 162–216`)**: Merges adjacent kept words across natural conversational breaths (`<= 650ms`) so the video player never stutters on micro-cuts.
+- **`buildSmartAutoFramingKeyframes()` (`lines 285–379`)**: Computes 9:16 crop coordinates (`primaryCropBox` and `secondaryCropBox`) for 1-Speaker, 2-Speaker 50/50 Top/Bottom Split, and 70/30 Screen Share + Face layouts.
+- **`runDeterministicQASelfHeal()` (`lines 506–605`)**: Automatically heals sub-450ms visual cuts and enforces YouTube Shorts duration bounds (`28s–58s`).
 
 ---
 
