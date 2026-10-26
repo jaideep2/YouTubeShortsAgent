@@ -10,6 +10,7 @@ import {
   runQACriticAndSelfHealAgent,
   runTrendAndScoutAgent,
   runTrendRadarAgent,
+  warmUpCloudExportSandbox,
 } from './src/services/shortsAgents.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -57,6 +58,9 @@ async function startServer() {
         });
         return;
       }
+
+      // Pre-warm the antigravity-preview-09-2026 export sandbox in the background while Pass 1 runs
+      void warmUpCloudExportSandbox();
 
       const candidates = await runTrendAndScoutAgent({
         youtubeUrl,
@@ -151,9 +155,18 @@ async function startServer() {
     }
   });
 
+  app.post('/api/agents/warm-export', async (_req, res) => {
+    try {
+      const status = await warmUpCloudExportSandbox();
+      res.json({ status: 'warm', ...status });
+    } catch {
+      res.json({ status: 'warming' });
+    }
+  });
+
   app.post('/api/agents/export-short', async (req, res) => {
     try {
-      const { candidate } = req.body || {};
+      const { candidate, fastTestMode } = req.body || {};
 
       if (!candidate || !candidate.id) {
         res.status(400).json({
@@ -164,6 +177,7 @@ async function startServer() {
 
       const exportResult = await runCloudVideoExportAgent({
         candidate,
+        fastTestMode: Boolean(fastTestMode),
       });
 
       res.json({ exportResult });

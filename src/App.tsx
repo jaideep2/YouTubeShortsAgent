@@ -39,11 +39,18 @@ import { DropPage } from './pages/DropPage';
 import { ScoutPage } from './pages/ScoutPage';
 import { SplitPage } from './pages/SplitPage';
 import { StagePage } from './pages/StagePage';
+import {
+  HACKATHON_TEST_CANDIDATES,
+  HACKATHON_TEST_NICHE,
+  HACKATHON_TEST_TREND_RADAR,
+  HACKATHON_TEST_YOUTUBE_URL,
+} from './data/hackathonTestRun';
 
 const STORAGE_KEYS = {
   CANDIDATES: 'shortsdirector_candidates_v1',
   SELECTED_ID: 'shortsdirector_selected_id_v1',
   SOURCE_INPUT: 'shortsdirector_source_input_v1',
+  TEST_MODE: 'shortsdirector_test_mode_v1',
 };
 
 function loadFromSession<T>(key: string, fallback: T): T {
@@ -116,6 +123,9 @@ function StudioShell() {
   const [selectedCandidateId, setSelectedCandidateId] = useState<string | null>(() =>
     loadFromSession<string | null>(STORAGE_KEYS.SELECTED_ID, null)
   );
+  const [isTestMode, setIsTestMode] = useState<boolean>(() =>
+    loadFromSession<boolean>(STORAGE_KEYS.TEST_MODE, false)
+  );
   const [pausesTightened, setPausesTightened] = useState<boolean>(true);
   const [pipelineStatus, setPipelineStatus] = useState<PipelineStatus>(() =>
     createInitialPipelineStatus(
@@ -157,11 +167,24 @@ function StudioShell() {
           STORAGE_KEYS.SELECTED_ID,
           JSON.stringify(selectedCandidateId)
         );
+      } else {
+        window.sessionStorage.removeItem(STORAGE_KEYS.SELECTED_ID);
       }
     } catch {
       // Ignore storage errors
     }
   }, [selectedCandidateId]);
+
+  useEffect(() => {
+    try {
+      window.sessionStorage.setItem(
+        STORAGE_KEYS.TEST_MODE,
+        JSON.stringify(isTestMode)
+      );
+    } catch {
+      // Ignore storage errors
+    }
+  }, [isTestMode]);
 
   useEffect(() => {
     try {
@@ -396,10 +419,122 @@ function StudioShell() {
   };
 
   const handleStartFullPipeline = async () => {
+    setIsTestMode(false);
     const scouted = await runPass1Scout();
     if (scouted.length > 0) {
       void handleRunCandidateDeepPass(scouted[0]);
     }
+  };
+
+  // Reset Studio to a completely clean state on Step 1 (/drop)
+  const handleResetStudio = () => {
+    try {
+      window.sessionStorage.removeItem(STORAGE_KEYS.CANDIDATES);
+      window.sessionStorage.removeItem(STORAGE_KEYS.SELECTED_ID);
+      window.sessionStorage.removeItem(STORAGE_KEYS.SOURCE_INPUT);
+      window.sessionStorage.removeItem(STORAGE_KEYS.TEST_MODE);
+    } catch {
+      // ignore
+    }
+    setIsTestMode(false);
+    setCandidates([]);
+    setSelectedCandidateId(null);
+    setTrendRadar(null);
+    setTrendError(null);
+    setPausesTightened(true);
+    setSourceInput({
+      mode: 'YOUTUBE_URL',
+      youtubeUrl: '',
+      mimeType: 'video/mp4',
+      nicheHint: HACKATHON_TEST_NICHE,
+    });
+    setPipelineStatus(createInitialPipelineStatus(false));
+    setChatMessages([
+      {
+        id: `welcome-${Date.now()}`,
+        role: 'assistant',
+        text: 'Studio reset! Paste a YouTube link or drop an MP4 recording for a fresh run, or click Test to load the pre-populated demo.',
+        timestamp: new Date().toISOString(),
+      },
+    ]);
+    navigate('/drop');
+  };
+
+  // Load the pre-populated Hackathon Demo Run (https://www.youtube.com/watch?v=lggpuoaP_C8) across all 4 tabs
+  const handleLoadTestRun = () => {
+    const clonedCandidates: ShortEDL[] = JSON.parse(
+      JSON.stringify(HACKATHON_TEST_CANDIDATES)
+    );
+    setIsTestMode(true);
+    setSourceInput({
+      mode: 'YOUTUBE_URL',
+      youtubeUrl: HACKATHON_TEST_YOUTUBE_URL,
+      mimeType: 'video/mp4',
+      nicheHint: HACKATHON_TEST_NICHE,
+    });
+    setTrendRadar(HACKATHON_TEST_TREND_RADAR);
+    setTrendError(null);
+    setPausesTightened(true);
+    setCandidates(clonedCandidates);
+    setSelectedCandidateId(clonedCandidates[0]?.id || null);
+    setPipelineStatus({
+      currentPass: null,
+      error: null,
+      steps: {
+        PASS_1_SCOUT: {
+          passId: 'PASS_1_SCOUT',
+          stepNumber: 1,
+          name: 'Pick a Moment',
+          subtitle: 'We watched the whole thing and found the best stories',
+          state: 'COMPLETED',
+          summaryText: `${clonedCandidates.length} stories found`,
+          completedAt: new Date().toISOString(),
+        },
+        PASS_2_SURGICAL_CUT: {
+          passId: 'PASS_2_SURGICAL_CUT',
+          stepNumber: 2,
+          name: 'Snip the Fluff',
+          subtitle: 'Removes filler words and tightens pauses automatically',
+          state: 'COMPLETED',
+          summaryText: 'Fillers & pauses snipped',
+          completedAt: new Date().toISOString(),
+        },
+        PASS_3_AUTO_FRAMING: {
+          passId: 'PASS_3_AUTO_FRAMING',
+          stepNumber: 3,
+          name: 'Make it Shine',
+          subtitle: 'Watch your 9:16 Short, tweak the hook, and upload to YouTube',
+          state: 'COMPLETED',
+          summaryText: '9:16 ready',
+          completedAt: new Date().toISOString(),
+        },
+        PASS_4_QA_CRITIC: {
+          passId: 'PASS_4_QA_CRITIC',
+          stepNumber: 4,
+          name: 'Final Polish',
+          subtitle: 'Smooths audio cuts and prepares your YouTube metadata',
+          state: 'COMPLETED',
+          summaryText: 'Ready to post',
+          completedAt: new Date().toISOString(),
+        },
+      },
+    });
+    setChatMessages((prev) => [
+      ...prev,
+      {
+        id: `test-loaded-${Date.now()}`,
+        role: 'assistant',
+        text: 'Loaded the Hackathon Test Run for https://www.youtube.com/watch?v=lggpuoaP_C8! All 4 Moments, Snip the Fluff, and Make it Shine are pre-populated and ready to demo.',
+        timestamp: new Date().toISOString(),
+        appliedActions: [
+          'Test Mode Active',
+          '4 Shorts Pre-Populated',
+          'Instant MP4 Export Ready',
+        ],
+      },
+    ]);
+    // Pre-warm the cloud export sandbox in background
+    fetch('/api/agents/warm-export', { method: 'POST' }).catch(() => {});
   };
 
   const handleRunSinglePass = async (passId: PipelinePassId) => {
@@ -673,8 +808,12 @@ function StudioShell() {
                 trendError={trendError}
                 onScanTrends={handleScanTrends}
                 onStartFullPipeline={handleStartFullPipeline}
+                onResetStudio={handleResetStudio}
+                onLoadTestRun={handleLoadTestRun}
+                isTestMode={isTestMode}
                 isPipelineRunning={isPipelineRunning}
                 hasCandidates={candidates.length > 0}
+                candidatesCount={candidates.length}
                 chatMessages={chatMessages}
                 suggestedPrompts={suggestedPrompts}
                 isSendingChat={isSendingChat}
@@ -728,6 +867,7 @@ function StudioShell() {
               <StagePage
                 candidate={selectedCandidate}
                 previewObjectUrl={sourceInput.previewObjectUrl}
+                isTestMode={isTestMode}
                 onUpdateCandidate={replaceCandidate}
                 onRunAutoFramePass={async () => {
                   if (selectedCandidate) {

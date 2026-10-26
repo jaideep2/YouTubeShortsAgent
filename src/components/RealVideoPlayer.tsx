@@ -138,7 +138,7 @@ export const RealVideoPlayer: React.FC<RealVideoPlayerProps> = ({
   onTimeUpdateSec,
   badgeText,
   compactControls = false,
-  mutedByDefault = false,
+  mutedByDefault = true,
   reframedCandidate,
   onSelectFramingMode,
 }) => {
@@ -154,6 +154,7 @@ export const RealVideoPlayer: React.FC<RealVideoPlayerProps> = ({
   const primaryYtReadyRef = useRef<boolean>(false);
   const secondaryYtReadyRef = useRef<boolean>(false);
   const pendingPlayRef = useRef<boolean>(false);
+  const lastPlayCommandMsRef = useRef<number>(0);
 
   const skipRangesRef = useRef<SkipRangeSec[]>(skipRanges);
   skipRangesRef.current = skipRanges;
@@ -184,8 +185,8 @@ export const RealVideoPlayer: React.FC<RealVideoPlayerProps> = ({
     jumpedRangesRef.current.clear();
   }, [startSec, reframedCandidate?.id, youtubeId, previewObjectUrl]);
 
-  // Bucket currentSec to integer seconds for framing lookup so we don't recalculate styles every 150ms
-  const framingLookupSec = Math.floor(currentSec);
+  // Bucket currentSec to 2-second intervals so framing updates smoothly without rapid re-renders
+  const framingLookupSec = Math.floor(currentSec / 2) * 2;
 
   const activeFraming: FramingKeyframe = useMemo(() => {
     if (!reframedCandidate) {
@@ -215,11 +216,22 @@ export const RealVideoPlayer: React.FC<RealVideoPlayerProps> = ({
       }
       return DEFAULT_FALLBACK_FRAMING;
     }
-    return resolveActiveFramingAtSourceSec(
+    const resolved = resolveActiveFramingAtSourceSec(
       reframedCandidate,
       framingLookupSec,
       forcedMode
     );
+    // In Auto mode (forcedMode === null), keep a steady single-pane layout while panning across speakers
+    // so the iframe container never splits/collapses mid-sentence unless the user selects Top/Bottom or Screen+Face.
+    if (forcedMode === null && resolved.layout !== 'SINGLE_SPEAKER') {
+      return {
+        ...resolved,
+        layout: 'SINGLE_SPEAKER',
+        topRatioPercent: 100,
+        bottomRatioPercent: 0,
+      };
+    }
+    return resolved;
   }, [reframedCandidate, framingLookupSec, forcedMode]);
 
   const primaryCropBox = activeFraming.primaryCropBox;
@@ -250,8 +262,20 @@ export const RealVideoPlayer: React.FC<RealVideoPlayerProps> = ({
     ]
   );
 
+  // Compute GPU-only horizontal pan percentage for constant-dimension YouTube iframe containers
+  const primaryPanXPercent = useMemo(() => {
+    const shift = (0.5 - primaryCropStyle.centerXPercent / 100) * 36;
+    return Number((-50 + shift).toFixed(1));
+  }, [primaryCropStyle.centerXPercent]);
+
+  const secondaryPanXPercent = useMemo(() => {
+    const shift = (0.5 - secondaryCropStyle.centerXPercent / 100) * 36;
+    return Number((-50 + shift).toFixed(1));
+  }, [secondaryCropStyle.centerXPercent]);
+
   // Sync secondary HTML5 video element for 2-pane split layouts
   const syncSecondaryHtmlVideo = (targetTime: number, playState?: boolean) => {
+    if (!previewObjectUrl) return;
     const vid = secondaryVideoRef.current;
     if (!vid) return;
     if (Math.abs(vid.currentTime - targetTime) > 0.3) {
@@ -269,50 +293,57 @@ export const RealVideoPlayer: React.FC<RealVideoPlayerProps> = ({
     const secPlayer = secondaryYtPlayerRef.current;
     if (!secPlayer || !secondaryYtReadyRef.current) return;
     try {
+      if (playState === false) {
+        secPlayer.pauseVideo?.();
+        return;
+      }
+      if (forcedMode === null || forcedMode === 'SINGLE_SPEAKER') {
+        secPlayer.pauseVideo?.();
+        return;
+      }
       if (typeof secPlayer.getCurrentTime === 'function') {
         const cur = Number(secPlayer.getCurrentTime() || 0);
-        if (Math.abs(cur - targetTime) > 1.2) {
+        if (Math.abs(cur - targetTime) > 2.0) {
           secPlayer.seekTo?.(targetTime, true);
         }
       }
       if (playState === true) {
         secPlayer.playVideo?.();
-      } else if (playState === false) {
-        secPlayer.pauseVideo?.();
       }
     } catch {
       // ignore transient YT iframe readiness errors
     }
   };
 
-  // Check and apply skip ranges with cooldown and visited-set so it NEVER loops or flickers
+  // Check and apply skip ranges for HTML5 video; for YouTube embeds, only loop cleanly at endSec
+  // so YouTube iframes never suffer mid-sentence rebuffer black frames.
   const checkAndApplySkips = (
     sec: number,
     isYouTubeSource: boolean,
     seekFn: (targetSec: number) => void
   ): number => {
     const now = Date.now();
-    // Cooldown after any seek so the player has time to settle on the new frame
-    if (now - lastSeekTimestampMsRef.current < 1100) {
+    if (now - lastSeekTimestampMsRef.current < 1500) {
       return sec;
     }
 
-    if (endSec && sec >= endSec + 0.35) {
+    if (endSec && sec >= endSec + 0.4) {
       lastSeekTimestampMsRef.current = now;
       jumpedRangesRef.current.clear();
       seekFn(startSec);
       return startSec;
     }
 
-    // For YouTube embeds, keyframe seeks are ~1.2s granular; only auto-jump ranges >= 1.2s
-    // so short 0.2s micro-cuts don't cause YouTube iframe re-buffering loops.
-    const minSkipDuration = isYouTubeSource ? 1.2 : 0.15;
+    // For YouTube embeds, play continuously without mid-clip seekTo interruptions
+    if (isYouTubeSource) {
+      return sec;
+    }
 
     for (const r of skipRangesRef.current) {
       const duration = r.endSec - r.startSec;
       const rangeKey = `${r.startSec.toFixed(2)}-${r.endSec.toFixed(2)}`;
       if (
-        duration >= minSkipDuration &&
+        duration >= 0.15 &&
         !jumpedRangesRef.current.has(rangeKey) &&
         sec >= r.startSec &&
         sec < r.endSec - 0.1
@@ -380,6 +411,7 @@ export const RealVideoPlayer: React.FC<RealVideoPlayerProps> = ({
                 }
                 if (pendingPlayRef.current) {
                   pendingPlayRef.current = false;
+                  lastPlayCommandMsRef.current = Date.now();
                   if (!mutedByDefault) {
                     event.target.unMute?.();
                     event.target.setVolume?.(100);
@@ -392,18 +424,32 @@ export const RealVideoPlayer: React.FC<RealVideoPlayerProps> = ({
             },
             onStateChange: (event: any) => {
               if (!isMounted) return;
-              // YT.PlayerState.PLAYING === 1, PAUSED === 2, ENDED === 0
-              if (event.data === 1) {
+              // YT.PlayerState: PLAYING === 1, PAUSED === 2, BUFFERING === 3, ENDED === 0
+              if (event.data === 1 || event.data === 3) {
                 setIsPlaying(true);
                 setHasStartedOnce(true);
-                const cur = Number(event.target?.getCurrentTime?.() || startSec);
-                syncSecondaryYtPlayer(cur, true);
-              } else if (event.data === 2 || event.data === 0) {
+                if (event.data === 1) {
+                  const cur = Number(event.target?.getCurrentTime?.() || startSec);
+                  syncSecondaryYtPlayer(cur, true);
+                }
+              } else if (event.data === 2) {
+                // Ignore transient PAUSED states that fire within 900ms of a play/seek command
+                if (Date.now() - lastPlayCommandMsRef.current < 900) {
+                  try {
+                    event.target?.playVideo?.();
+                  } catch {
+                    // ignore
+                  }
+                  return;
+                }
                 setIsPlaying(false);
                 syncSecondaryYtPlayer(
                   Number(event.target?.getCurrentTime?.() || startSec),
                   false
                 );
+              } else if (event.data === 0) {
+                setIsPlaying(false);
+                syncSecondaryYtPlayer(startSec, false);
               }
             },
           },
@@ -462,7 +508,9 @@ export const RealVideoPlayer: React.FC<RealVideoPlayerProps> = ({
           const t = Number(p.getCurrentTime() || 0);
           if (t > 0) {
             const nextT = checkAndApplySkips(t, true, (target) => {
+              lastPlayCommandMsRef.current = Date.now();
               p.seekTo?.(target, true);
+              p.playVideo?.();
               syncSecondaryYtPlayer(target, true);
             });
             setCurrentSec(nextT);
@@ -501,9 +549,10 @@ export const RealVideoPlayer: React.FC<RealVideoPlayerProps> = ({
   const handleSeekToSec = (targetSec: number) => {
     jumpedRangesRef.current.clear();
     lastSeekTimestampMsRef.current = Date.now();
+    lastPlayCommandMsRef.current = Date.now();
     setHasStartedOnce(true);
 
-    if (primaryVideoRef.current) {
+    if (previewObjectUrl && primaryVideoRef.current) {
       primaryVideoRef.current.currentTime = targetSec;
       primaryVideoRef.current.muted = isMuted;
       primaryVideoRef.current.play().catch(() => {});
@@ -534,7 +583,7 @@ export const RealVideoPlayer: React.FC<RealVideoPlayerProps> = ({
   };
 
   const handleTogglePlay = () => {
-    if (primaryVideoRef.current) {
+    if (previewObjectUrl && primaryVideoRef.current) {
       if (primaryVideoRef.current.paused) {
         primaryVideoRef.current.muted = isMuted;
         primaryVideoRef.current.play().catch(() => {});
@@ -552,17 +601,20 @@ export const RealVideoPlayer: React.FC<RealVideoPlayerProps> = ({
     const p = primaryYtPlayerRef.current;
     if (p && primaryYtReadyRef.current) {
       if (isPlaying && typeof p.pauseVideo === 'function') {
+        lastPlayCommandMsRef.current = 0;
         p.pauseVideo();
         syncSecondaryYtPlayer(currentSec, false);
         setIsPlaying(false);
       } else if (typeof p.playVideo === 'function') {
+        lastPlayCommandMsRef.current = Date.now();
         if (!isMuted) {
           p.unMute?.();
           p.setVolume?.(100);
         }
-        if (!hasStartedOnce && startSec > 0 && typeof p.seekTo === 'function') {
+        // Only seek if the video had already played past endSec; on first play, playerVars.start already cued startSec
+        if (hasStartedOnce && endSec && currentSec >= endSec) {
           lastSeekTimestampMsRef.current = Date.now();
-          p.seekTo(startSec, true);
+          p.seekTo?.(startSec, true);
           syncSecondaryYtPlayer(startSec, true);
         } else {
           syncSecondaryYtPlayer(currentSec, true);
@@ -572,6 +624,7 @@ export const RealVideoPlayer: React.FC<RealVideoPlayerProps> = ({
         setIsPlaying(true);
       }
     } else {
+      lastPlayCommandMsRef.current = Date.now();
       pendingPlayRef.current = true;
       setHasStartedOnce(true);
       setIsPlaying(true);
@@ -587,7 +640,7 @@ export const RealVideoPlayer: React.FC<RealVideoPlayerProps> = ({
     const nextMuted = !isMuted;
     setIsMuted(nextMuted);
 
-    if (primaryVideoRef.current) {
+    if (previewObjectUrl && primaryVideoRef.current) {
       primaryVideoRef.current.muted = nextMuted;
       return;
     }
@@ -606,13 +659,26 @@ export const RealVideoPlayer: React.FC<RealVideoPlayerProps> = ({
   const handleChooseFramingMode = (mode: VerticalLayoutMode | null) => {
     setForcedMode(mode);
     onSelectFramingMode?.(mode);
+    if (isPlaying && !previewObjectUrl && youtubeId) {
+      const p = primaryYtPlayerRef.current;
+      const cur = Number(p?.getCurrentTime?.() || currentSec);
+      if (mode === 'SPLIT_TOP_BOTTOM' || mode === 'CONTENT_ZOOM_PIP') {
+        const secPlayer = secondaryYtPlayerRef.current;
+        if (secPlayer && secondaryYtReadyRef.current) {
+          secPlayer.seekTo?.(cur, true);
+          secPlayer.playVideo?.();
+        }
+      } else {
+        secondaryYtPlayerRef.current?.pauseVideo?.();
+      }
+    }
   };
 
   const layoutMode = activeFraming.layout;
   const modeMeta = FRAMING_MODE_META[layoutMode];
   const hasMedia = Boolean(previewObjectUrl || youtubeId);
 
-  // Compute persistent pane heights so the video/iframe DOM nodes NEVER unmount when switching modes!
+  // Persistent pane heights without CSS height transitions so YouTube iframes never fire resize events
   const topPaneHeightClass =
     layoutMode === 'SINGLE_SPEAKER'
       ? 'h-full'
@@ -713,65 +779,84 @@ export const RealVideoPlayer: React.FC<RealVideoPlayerProps> = ({
           aria-label={isPlaying ? 'Pause 9:16 Short' : 'Play 9:16 Short'}
           className="w-full max-w-[260px] aspect-[9/16] rounded-3xl overflow-hidden border-4 border-[#1F1C18] shadow-[0_18px_38px_-12px_rgba(31,28,24,0.35)] bg-[#1F1C18] relative cursor-pointer group flex flex-col"
         >
-          {/* TOP / PRIMARY PANE (Always Mounted so Video/Audio Never Resets or Flickers) */}
-          <div
-            className={`w-full relative overflow-hidden transition-all duration-300 ${topPaneHeightClass}`}
-          >
-            {previewObjectUrl ? (
-              <video
-                ref={primaryVideoRef}
-                src={previewObjectUrl}
-                playsInline
-                muted={isMuted}
-                onPlay={(e) => {
-                  setIsPlaying(true);
-                  setHasStartedOnce(true);
-                  syncSecondaryHtmlVideo(e.currentTarget.currentTime, true);
-                }}
-                onPause={(e) => {
-                  setIsPlaying(false);
-                  syncSecondaryHtmlVideo(e.currentTarget.currentTime, false);
-                }}
-                onLoadedMetadata={(e) => {
-                  if (startSec > 0) {
-                    e.currentTarget.currentTime = startSec;
-                    syncSecondaryHtmlVideo(startSec, false);
-                  }
-                }}
-                onTimeUpdate={(e) => {
-                  const sec = e.currentTarget.currentTime;
-                  const nextSec = checkAndApplySkips(sec, false, (target) => {
-                    e.currentTarget.currentTime = target;
-                  });
-                  syncSecondaryHtmlVideo(nextSec);
-                  setCurrentSec(nextSec);
-                  onTimeUpdateSec?.(nextSec);
-                }}
-                style={{
-                  width: '100%',
-                  height: '100%',
-                  objectFit: 'cover',
-                  objectPosition: primaryCropStyle.objectPosition,
-                  transform: `scale(${primaryCropStyle.scale})`,
-                }}
-              />
-            ) : youtubeId ? (
+          {/* TOP / PRIMARY PANE (Always Mounted, Constant-Dimension YouTube Container so Video Never Flickers) */}
+          <div className={`w-full relative overflow-hidden ${topPaneHeightClass}`}>
+            <video
+              ref={(el) => {
+                primaryVideoRef.current = el;
+                if (el && !el.hasAttribute('muted')) {
+                  el.muted = true;
+                  el.defaultMuted = true;
+                  el.playsInline = true;
+                  el.setAttribute('muted', '');
+                  el.setAttribute('playsinline', '');
+                }
+              }}
+              src={previewObjectUrl || undefined}
+              playsInline
+              muted
+              onPlay={(e) => {
+                if (!previewObjectUrl) return;
+                setIsPlaying(true);
+                setHasStartedOnce(true);
+                syncSecondaryHtmlVideo(e.currentTarget.currentTime, true);
+              }}
+              onPause={(e) => {
+                if (!previewObjectUrl) return;
+                setIsPlaying(false);
+                syncSecondaryHtmlVideo(e.currentTarget.currentTime, false);
+              }}
+              onLoadedMetadata={(e) => {
+                if (!previewObjectUrl) return;
+                if (startSec > 0) {
+                  e.currentTarget.currentTime = startSec;
+                  syncSecondaryHtmlVideo(startSec, false);
+                }
+              }}
+              onTimeUpdate={(e) => {
+                if (!previewObjectUrl) return;
+                const sec = e.currentTarget.currentTime;
+                const nextSec = checkAndApplySkips(sec, false, (target) => {
+                  e.currentTarget.currentTime = target;
+                });
+                syncSecondaryHtmlVideo(nextSec);
+                setCurrentSec(nextSec);
+                onTimeUpdateSec?.(nextSec);
+              }}
+              className={previewObjectUrl ? 'w-full h-full object-cover' : 'hidden'}
+              style={
+                previewObjectUrl
+                  ? {
+                      width: '100%',
+                      height: '100%',
+                      objectFit: 'cover',
+                      objectPosition: primaryCropStyle.objectPosition,
+                      transform: `scale(${primaryCropStyle.scale})`,
+                    }
+                  : undefined
+              }
+            />
+            {!previewObjectUrl && youtubeId ? (
               <div className="w-full h-full relative overflow-hidden bg-[#1F1C18]">
-                {/* Persistent YouTube Player (Unmuted Master Audio + Video) */}
+                {/* Constant-dimension YouTube container panned exclusively via GPU translate3d */}
                 <div
                   style={{
-                    position: 'relative',
+                    position: 'absolute',
+                    top: '50%',
+                    left: '50%',
                     zIndex: 2,
-                    width: `${primaryCropStyle.iframeWidthPercent}%`,
-                    height: '100%',
-                    marginLeft: `${primaryCropStyle.iframeMarginLeftPercent}%`,
+                    width: '230%',
+                    height: '464px',
+                    transform: `translate3d(${primaryPanXPercent}%, -50%, 0) scale(${primaryCropStyle.scale})`,
+                    transformOrigin: 'center center',
                     pointerEvents: 'none',
+                    willChange: 'transform',
                   }}
                 >
                   <div id={primaryYtContainerId} className="w-full h-full" />
                 </div>
 
-                {/* High-res poster shown only before playback starts */}
+                {/* High-res poster shown only before first playback starts */}
                 {!hasStartedOnce && youtubePosterUrl && (
                   <img
                     src={`https://i.ytimg.com/vi/${youtubeId}/maxresdefault.jpg`}
@@ -795,13 +880,13 @@ export const RealVideoPlayer: React.FC<RealVideoPlayerProps> = ({
                   />
                 )}
               </div>
-            ) : (
+            ) : !previewObjectUrl ? (
               <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center text-[#FAF7F2]/80">
                 <p className="text-xs font-medium">
                   Drop an MP4 video or paste a YouTube link to preview your 9:16 Short
                 </p>
               </div>
-            )}
+            ) : null}
 
             {/* Top / Primary Badge Overlay */}
             {layoutMode === 'SINGLE_SPEAKER' && (
@@ -830,33 +915,48 @@ export const RealVideoPlayer: React.FC<RealVideoPlayerProps> = ({
           </div>
 
           {/* BOTTOM / SECONDARY PANE (Always Mounted for Instant Zero-Flicker Split View) */}
-          <div
-            className={`w-full relative overflow-hidden transition-all duration-300 ${bottomPaneHeightClass}`}
-          >
-            {previewObjectUrl ? (
-              <video
-                ref={secondaryVideoRef}
-                src={previewObjectUrl}
-                muted
-                playsInline
-                style={{
-                  width: '100%',
-                  height: '100%',
-                  objectFit: 'cover',
-                  objectPosition: secondaryCropStyle.objectPosition,
-                  transform: `scale(${secondaryCropStyle.scale})`,
-                }}
-              />
-            ) : youtubeId ? (
+          <div className={`w-full relative overflow-hidden ${bottomPaneHeightClass}`}>
+            <video
+              ref={(el) => {
+                secondaryVideoRef.current = el;
+                if (el) {
+                  el.muted = true;
+                  el.defaultMuted = true;
+                  el.playsInline = true;
+                  el.setAttribute('muted', '');
+                  el.setAttribute('playsinline', '');
+                }
+              }}
+              src={previewObjectUrl || undefined}
+              playsInline
+              muted
+              className={previewObjectUrl ? 'w-full h-full object-cover' : 'hidden'}
+              style={
+                previewObjectUrl
+                  ? {
+                      width: '100%',
+                      height: '100%',
+                      objectFit: 'cover',
+                      objectPosition: secondaryCropStyle.objectPosition,
+                      transform: `scale(${secondaryCropStyle.scale})`,
+                    }
+                  : undefined
+              }
+            />
+            {!previewObjectUrl && youtubeId ? (
               <div className="w-full h-full relative overflow-hidden bg-[#1F1C18]">
                 <div
                   style={{
-                    position: 'relative',
+                    position: 'absolute',
+                    top: '50%',
+                    left: '50%',
                     zIndex: 2,
-                    width: `${secondaryCropStyle.iframeWidthPercent}%`,
-                    height: '100%',
-                    marginLeft: `${secondaryCropStyle.iframeMarginLeftPercent}%`,
+                    width: '230%',
+                    height: '464px',
+                    transform: `translate3d(${secondaryPanXPercent}%, -50%, 0) scale(${secondaryCropStyle.scale})`,
+                    transformOrigin: 'center center',
                     pointerEvents: 'none',
+                    willChange: 'transform',
                   }}
                 >
                   <div id={secondaryYtContainerId} className="w-full h-full" />

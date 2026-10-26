@@ -33,6 +33,7 @@ export interface ClientQACriticRequest {
 
 export interface ClientCloudExportRequest {
   candidate: ShortEDL;
+  fastTestMode?: boolean;
 }
 
 export interface ClientAgentChatRequest {

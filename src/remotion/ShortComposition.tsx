@@ -89,6 +89,11 @@ export const ShortComposition: React.FC<ShortCompositionProps> = ({
   const lastSeekWallMsRef = useRef<number>(0);
   const prevFrameRef = useRef<number>(frame);
   const pauseTimerRef = useRef<number | null>(null);
+  const hasPlayedOnceRef = useRef<boolean>(false);
+
+  if (frame > 0) {
+    hasPlayedOnceRef.current = true;
+  }
 
   const timelineMs = Math.round((frame / fps) * 1000);
   const hookDurationMs = candidate.packaging?.hookBanner?.durationMs || 3000;
@@ -101,7 +106,9 @@ export const ShortComposition: React.FC<ShortCompositionProps> = ({
       ? candidate.packaging.framingKeyframes
       : buildCoarseAutoFramingKeyframes(candidate.coarseSegments, candidate.title);
 
-  const rawKeyframe = getActiveFraming(availableKeyframes, timelineMs);
+  // Bucket timelineMs to 2000ms intervals for smooth camera panning without rapid style updates
+  const bucketedTimelineMs = Math.floor(timelineMs / 2000) * 2000;
+  const rawKeyframe = getActiveFraming(availableKeyframes, bucketedTimelineMs);
   const activeKeyframe =
     rawKeyframe && forcedCameraMode
       ? applyFramingLayoutPreset(rawKeyframe, forcedCameraMode)
@@ -116,8 +123,10 @@ export const ShortComposition: React.FC<ShortCompositionProps> = ({
     timelineMs
   );
 
+  // In Auto mode (forcedCameraMode === null), keep a steady SINGLE_SPEAKER pane height while panning
+  // across speakers so the YouTube iframe container never resizes mid-playback.
   const layout: VerticalLayoutMode =
-    forcedCameraMode || activeKeyframe?.layout || 'SINGLE_SPEAKER';
+    forcedCameraMode || 'SINGLE_SPEAKER';
 
   const primaryCropBox = activeKeyframe?.primaryCropBox || {
     x: 0.14,
@@ -152,18 +161,24 @@ export const ShortComposition: React.FC<ShortCompositionProps> = ({
     ]
   );
 
+  const primaryPanXPercent = useMemo(() => {
+    const shift = (0.5 - primaryCropStyle.centerXPercent / 100) * 36;
+    return Number((-50 + shift).toFixed(1));
+  }, [primaryCropStyle.centerXPercent]);
+
+  const secondaryPanXPercent = useMemo(() => {
+    const shift = (0.5 - secondaryCropStyle.centerXPercent / 100) * 36;
+    return Number((-50 + shift).toFixed(1));
+  }, [secondaryCropStyle.centerXPercent]);
+
   const youtubeId = extractYoutubeVideoId(candidate.sourceVideoUri);
   const youtubePosterUrl = youtubeId
     ? `https://i.ytimg.com/vi/${youtubeId}/hqdefault.jpg`
     : undefined;
 
-  const targetSourceSec = useMemo(() => {
-    if (activeCut && Number.isFinite(activeCut.sourceStartMs)) {
-      const offsetInCutMs = Math.max(0, timelineMs - (activeCut.timelineStartMs || 0));
-      return Math.max(0, (activeCut.sourceStartMs + offsetInCutMs) / 1000);
-    }
+  const continuousSourceSec = useMemo(() => {
     return Math.max(0, (candidate.rawSourceStartSec || 0) + timelineMs / 1000);
-  }, [activeCut, timelineMs, candidate.rawSourceStartSec]);
+  }, [timelineMs, candidate.rawSourceStartSec]);
 
   // Mount persistent YT.Player instances once per YouTube ID so the video never reloads or flickers!
   useEffect(() => {
@@ -171,6 +186,7 @@ export const ShortComposition: React.FC<ShortCompositionProps> = ({
     let isMounted = true;
     primaryReadyRef.current = false;
     secondaryReadyRef.current = false;
+    hasPlayedOnceRef.current = false;
     const initialStart = Math.max(0, Math.floor(candidate.rawSourceStartSec || 0));
 
     loadYouTubeIframeApi().then((YT) => {
@@ -275,34 +291,33 @@ export const ShortComposition: React.FC<ShortCompositionProps> = ({
     };
   }, [youtubeId, previewObjectUrl, primaryYtId, secondaryYtId, candidate.rawSourceStartSec]);
 
-  // Synchronize YT.Player play/pause and large seeks with Remotion frame progression
+  // Synchronize YT.Player play/pause with Remotion frame progression without periodic seek thrashing
   useEffect(() => {
     if (!youtubeId || previewObjectUrl) return;
     const p = primaryYtPlayerRef.current;
     const s = secondaryYtPlayerRef.current;
 
-    const frameChanged = frame !== prevFrameRef.current;
+    const frameDelta = frame - prevFrameRef.current;
+    const frameChanged = frameDelta !== 0;
+    const didUserScrubOrLoop =
+      Math.abs(frameDelta) > 20 || (frameDelta < 0 && frame <= 5);
     prevFrameRef.current = frame;
 
     if (frameChanged && frame > 0) {
       if (p && primaryReadyRef.current) {
         try {
           const state = p.getPlayerState?.();
-          if (state !== 1) {
+          if (state !== 1 && state !== 3) {
             p.unMute?.();
             p.setVolume?.(100);
             p.playVideo?.();
           }
-          const cur = Number(p.getCurrentTime?.() || targetSourceSec);
           const now = Date.now();
-          if (
-            Math.abs(cur - targetSourceSec) > 2.0 &&
-            now - lastSeekWallMsRef.current > 1200
-          ) {
+          if (didUserScrubOrLoop && now - lastSeekWallMsRef.current > 1800) {
             lastSeekWallMsRef.current = now;
-            p.seekTo?.(targetSourceSec, true);
-            if (s && secondaryReadyRef.current) {
-              s.seekTo?.(targetSourceSec, true);
+            p.seekTo?.(continuousSourceSec, true);
+            if (s && secondaryReadyRef.current && layout !== 'SINGLE_SPEAKER') {
+              s.seekTo?.(continuousSourceSec, true);
             }
           }
         } catch {
@@ -311,9 +326,14 @@ export const ShortComposition: React.FC<ShortCompositionProps> = ({
       }
       if (s && secondaryReadyRef.current) {
         try {
-          if (s.getPlayerState?.() !== 1) {
-            s.mute?.();
-            s.playVideo?.();
+          if (layout !== 'SINGLE_SPEAKER') {
+            const secState = s.getPlayerState?.();
+            if (secState !== 1 && secState !== 3) {
+              s.mute?.();
+              s.playVideo?.();
+            }
+          } else {
+            s.pauseVideo?.();
           }
         } catch {
           // ignore
@@ -328,8 +348,8 @@ export const ShortComposition: React.FC<ShortCompositionProps> = ({
         } catch {
           // ignore
         }
-      }, 260);
-    } else if (frame === 0) {
+      }, 950);
+    } else if (frame === 0 && !hasPlayedOnceRef.current) {
       try {
         primaryYtPlayerRef.current?.pauseVideo?.();
         secondaryYtPlayerRef.current?.pauseVideo?.();
@@ -337,7 +357,7 @@ export const ShortComposition: React.FC<ShortCompositionProps> = ({
         // ignore
       }
     }
-  }, [frame, youtubeId, previewObjectUrl, targetSourceSec]);
+  }, [frame, youtubeId, previewObjectUrl, continuousSourceSec, layout]);
 
   const hookEntrance = spring({
     frame,
@@ -359,25 +379,7 @@ export const ShortComposition: React.FC<ShortCompositionProps> = ({
     }
   );
 
-  const cutStartFrame =
-    activeCut && Number.isFinite(activeCut.timelineStartMs)
-      ? Math.floor((activeCut.timelineStartMs / 1000) * fps)
-      : 0;
-  const localCutFrame = Number.isFinite(frame - cutStartFrame)
-    ? Math.max(0, frame - cutStartFrame)
-    : 0;
-  const cameraTransition = spring({
-    frame: localCutFrame,
-    fps,
-    config: {
-      damping: 18,
-      stiffness: 120,
-    },
-  });
-
-  const zoomScale = interpolate(cameraTransition, [0, 1], [1.02, 1.0]);
-
-  // Persistent flex pane heights so switching between 1-speaker, Top/Bottom, and Screen+Face never unmounts the video
+  // Persistent flex pane heights without CSS transitions so YouTube iframes never fire resize events
   const topPaneHeight =
     layout === 'SINGLE_SPEAKER'
       ? '100%'
@@ -403,12 +405,11 @@ export const ShortComposition: React.FC<ShortCompositionProps> = ({
       {/* 9:16 Smart Auto-Framing Stage (Persistent 2-Pane Flex Container) */}
       <AbsoluteFill
         style={{
-          transform: `scale(${zoomScale})`,
           display: 'flex',
           flexDirection: 'column',
         }}
       >
-        {/* TOP / PRIMARY PANE (Always Mounted) */}
+        {/* TOP / PRIMARY PANE (Always Mounted, Constant-Dimension YouTube Container) */}
         <div
           style={{
             height: topPaneHeight,
@@ -421,13 +422,27 @@ export const ShortComposition: React.FC<ShortCompositionProps> = ({
                 : layout === 'CONTENT_ZOOM_PIP'
                   ? '4px solid #F59E0B'
                   : 'none',
-            transition: 'height 280ms ease',
           }}
         >
+          <video
+            ref={(el) => {
+              if (el) {
+                el.muted = true;
+                el.defaultMuted = true;
+                el.playsInline = true;
+                el.setAttribute('muted', '');
+                el.setAttribute('playsinline', '');
+              }
+            }}
+            playsInline
+            muted
+            className="hidden"
+          />
           {previewObjectUrl ? (
             <Video
               src={previewObjectUrl}
-              muted={false}
+              playsInline
+              muted
               style={{
                 width: '100%',
                 height: '100%',
@@ -440,18 +455,22 @@ export const ShortComposition: React.FC<ShortCompositionProps> = ({
             <div className="w-full h-full relative overflow-hidden bg-[#1F1C18]">
               <div
                 style={{
-                  position: 'relative',
+                  position: 'absolute',
+                  top: '50%',
+                  left: '50%',
                   zIndex: 2,
-                  width: `${primaryCropStyle.iframeWidthPercent}%`,
-                  height: '100%',
-                  marginLeft: `${primaryCropStyle.iframeMarginLeftPercent}%`,
+                  width: '230%',
+                  height: '640px',
+                  transform: `translate3d(${primaryPanXPercent}%, -50%, 0) scale(${primaryCropStyle.scale})`,
+                  transformOrigin: 'center center',
                   pointerEvents: 'none',
+                  willChange: 'transform',
                 }}
               >
                 <div id={primaryYtId} className="w-full h-full" />
               </div>
 
-              {frame === 0 && youtubePosterUrl && (
+              {!hasPlayedOnceRef.current && frame === 0 && youtubePosterUrl && (
                 <img
                   src={`https://i.ytimg.com/vi/${youtubeId}/maxresdefault.jpg`}
                   onError={(e) => {
@@ -507,7 +526,7 @@ export const ShortComposition: React.FC<ShortCompositionProps> = ({
           )}
         </div>
 
-        {/* BOTTOM / SECONDARY PANE (Always Mounted) */}
+        {/* BOTTOM / SECONDARY PANE (Always Mounted, Constant-Dimension YouTube Container) */}
         <div
           style={{
             height: bottomPaneHeight,
@@ -516,12 +535,12 @@ export const ShortComposition: React.FC<ShortCompositionProps> = ({
             overflow: 'hidden',
             opacity: layout === 'SINGLE_SPEAKER' ? 0 : 1,
             pointerEvents: 'none',
-            transition: 'height 280ms ease, opacity 200ms ease',
           }}
         >
           {previewObjectUrl ? (
             <Video
               src={previewObjectUrl}
+              playsInline
               muted
               style={{
                 width: '100%',
@@ -535,18 +554,22 @@ export const ShortComposition: React.FC<ShortCompositionProps> = ({
             <div className="w-full h-full relative overflow-hidden bg-[#1F1C18]">
               <div
                 style={{
-                  position: 'relative',
+                  position: 'absolute',
+                  top: '50%',
+                  left: '50%',
                   zIndex: 2,
-                  width: `${secondaryCropStyle.iframeWidthPercent}%`,
-                  height: '100%',
-                  marginLeft: `${secondaryCropStyle.iframeMarginLeftPercent}%`,
+                  width: '230%',
+                  height: '640px',
+                  transform: `translate3d(${secondaryPanXPercent}%, -50%, 0) scale(${secondaryCropStyle.scale})`,
+                  transformOrigin: 'center center',
                   pointerEvents: 'none',
+                  willChange: 'transform',
                 }}
               >
                 <div id={secondaryYtId} className="w-full h-full" />
               </div>
 
-              {frame === 0 && youtubePosterUrl && (
+              {!hasPlayedOnceRef.current && frame === 0 && youtubePosterUrl && (
                 <img
                   src={`https://i.ytimg.com/vi/${youtubeId}/maxresdefault.jpg`}
                   onError={(e) => {

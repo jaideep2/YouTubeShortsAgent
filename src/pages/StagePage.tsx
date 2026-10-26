@@ -42,6 +42,10 @@ import {
 import { ShortComposition } from '../remotion/ShortComposition';
 import { UltravioletTooltip } from '../components/UltravioletTooltip';
 import { requestCloudVideoExport } from '../services/clientApi';
+import firebaseConfig from '../../firebase-applet-config.json';
+
+let cachedYtAccessToken: string | null = null;
+let cachedYtChannelName: string | null = null;
 
 interface StagePageProps {
   candidate: ShortEDL | null;
@@ -50,6 +54,7 @@ interface StagePageProps {
   onRunAutoFramePass: () => Promise<void>;
   onRunQACriticPass: () => Promise<void>;
   isPipelineRunning: boolean;
+  isTestMode?: boolean;
 }
 
 const CAMERA_MODES: Array<{
@@ -75,7 +80,7 @@ const CAMERA_MODES: Array<{
 ];
 
 const EXPORT_FRIENDLY_STEPS = [
-  'Spinning up your private cloud video studio...',
+  'Connecting to warm cloud video studio...',
   'Stitching your kept story beats & tightening pauses...',
   'Burning in your 3-second Hook Sticker & bouncy captions...',
   'Wrapping up your 9:16 vertical MP4 Short...',
@@ -93,6 +98,7 @@ export const StagePage: React.FC<StagePageProps> = ({
   onUpdateCandidate,
   onRunAutoFramePass,
   isPipelineRunning,
+  isTestMode = false,
 }) => {
   const navigate = useNavigate();
   const [copiedField, setCopiedField] = useState<
@@ -110,13 +116,13 @@ export const StagePage: React.FC<StagePageProps> = ({
   const [cloudExportError, setCloudExportError] = useState<string | null>(null);
   const [showNerdyDetails, setShowNerdyDetails] = useState(false);
 
-  // YouTube Direct Upload Modal & OAuth State
+  // YouTube Direct Upload Modal & OAuth State (in-memory token storage)
   const [showYoutubeUploadModal, setShowYoutubeUploadModal] = useState(false);
-  const [ytAccessToken, setYtAccessToken] = useState<string | null>(() =>
-    sessionStorage.getItem('yt_oauth_access_token')
+  const [ytAccessToken, setYtAccessToken] = useState<string | null>(
+    () => cachedYtAccessToken
   );
-  const [ytChannelName, setYtChannelName] = useState<string | null>(() =>
-    sessionStorage.getItem('yt_oauth_channel_name')
+  const [ytChannelName, setYtChannelName] = useState<string | null>(
+    () => cachedYtChannelName
   );
   const [ytPrivacyStatus, setYtPrivacyStatus] = useState<
     'private' | 'unlisted' | 'public'
@@ -337,7 +343,10 @@ export const StagePage: React.FC<StagePageProps> = ({
     }, 3200);
 
     try {
-      const result = await requestCloudVideoExport({ candidate });
+      const result = await requestCloudVideoExport({
+        candidate,
+        fastTestMode: Boolean(isTestMode),
+      });
       setCloudExportResult(result);
 
       if (result.mp4Base64) {
@@ -391,13 +400,14 @@ export const StagePage: React.FC<StagePageProps> = ({
 
     try {
       const clientId =
+        firebaseConfig.oAuthClientId ||
         (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID ||
         (import.meta as any).env?.VITE_OAUTH_CLIENT_ID ||
         '';
 
       if (!clientId) {
         setYoutubeUploadError(
-          'Google OAuth is being configured for this studio. Once you approve the YouTube OAuth setup card in AI Studio, click Sign In with Google again.'
+          'Google OAuth Client ID is missing in firebase-applet-config.json.'
         );
         setIsConnectingYoutube(false);
         return;
@@ -405,6 +415,18 @@ export const StagePage: React.FC<StagePageProps> = ({
 
       if (!window.google?.accounts?.oauth2) {
         await new Promise<void>((resolve, reject) => {
+          const existing = document.querySelector(
+            'script[src="https://accounts.google.com/gsi/client"]'
+          ) as HTMLScriptElement | null;
+          if (existing) {
+            existing.addEventListener('load', () => resolve(), { once: true });
+            existing.addEventListener(
+              'error',
+              () => reject(new Error('Could not load Google Sign-In script.')),
+              { once: true }
+            );
+            return;
+          }
           const script = document.createElement('script');
           script.src = 'https://accounts.google.com/gsi/client';
           script.async = true;
@@ -428,8 +450,8 @@ export const StagePage: React.FC<StagePageProps> = ({
             return;
           }
           const accessToken = tokenResponse.access_token;
+          cachedYtAccessToken = accessToken;
           setYtAccessToken(accessToken);
-          sessionStorage.setItem('yt_oauth_access_token', accessToken);
 
           // Fetch YouTube channel name
           try {
@@ -442,12 +464,25 @@ export const StagePage: React.FC<StagePageProps> = ({
             const chanData = await chanRes.json();
             const title =
               chanData?.items?.[0]?.snippet?.title || 'Connected YouTube Channel';
+            cachedYtChannelName = title;
             setYtChannelName(title);
-            sessionStorage.setItem('yt_oauth_channel_name', title);
           } catch {
+            cachedYtChannelName = 'Connected YouTube Channel';
             setYtChannelName('Connected YouTube Channel');
           }
           setIsConnectingYoutube(false);
+        },
+        error_callback: (err: any) => {
+          setIsConnectingYoutube(false);
+          if (err?.type === 'popup_failed_to_open') {
+            setYoutubeUploadError(
+              'Your browser blocked the Google Sign-In popup. Please allow popups and try again.'
+            );
+          } else if (err?.type === 'popup_closed') {
+            setYoutubeUploadError(
+              'Google Sign-In window was closed before completing sign-in.'
+            );
+          }
         },
       });
 
@@ -473,7 +508,10 @@ export const StagePage: React.FC<StagePageProps> = ({
         setYoutubeUploadStep(
           'Rendering your 9:16 vertical MP4 Short in the cloud...'
         );
-        const exported = await requestCloudVideoExport({ candidate });
+        const exported = await requestCloudVideoExport({
+          candidate,
+          fastTestMode: Boolean(isTestMode),
+        });
         setCloudExportResult(exported);
         mp4Base64 = exported.mp4Base64;
       }

@@ -7,6 +7,8 @@ import {
   FileVideo,
   Flame,
   Loader2,
+  Play,
+  RotateCcw,
   Scissors,
   Sparkles,
   Upload,
@@ -31,8 +33,12 @@ interface DropPageProps {
   trendError: string | null;
   onScanTrends: (niche: string) => Promise<void>;
   onStartFullPipeline: () => Promise<void>;
+  onResetStudio: () => void;
+  onLoadTestRun: () => void;
+  isTestMode: boolean;
   isPipelineRunning: boolean;
   hasCandidates: boolean;
+  candidatesCount?: number;
   chatMessages: AgentChatMessage[];
   suggestedPrompts: string[];
   isSendingChat: boolean;
@@ -65,8 +71,12 @@ export const DropPage: React.FC<DropPageProps> = ({
   trendError,
   onScanTrends,
   onStartFullPipeline,
+  onResetStudio,
+  onLoadTestRun,
+  isTestMode,
   isPipelineRunning,
   hasCandidates,
+  candidatesCount = 0,
   chatMessages,
   suggestedPrompts,
   isSendingChat,
@@ -90,7 +100,7 @@ export const DropPage: React.FC<DropPageProps> = ({
       const result = String(reader.result || '');
       const base64 = result.includes(',') ? result.split(',')[1] : result;
       onUpdateSourceInput({
-        mode: 'FILE_UPLOAD',
+        mode: 'YOUTUBE_URL' === sourceInput.mode ? 'FILE_UPLOAD' : 'FILE_UPLOAD',
         fileName: file.name,
         fileSizeBytes: file.size,
         mimeType: file.type || 'video/mp4',
@@ -241,7 +251,7 @@ export const DropPage: React.FC<DropPageProps> = ({
         variant="hero"
       />
 
-      {/* 3. Warm Hero Header + Optional Step-by-Step Studio */}
+      {/* 3. Warm Hero Header + Reset & Test Controls */}
       <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4 pt-2 pb-4 border-b border-[#E8E0D2]">
         <div className="space-y-2 max-w-2xl">
           <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-[#F3EDE2] border border-[#E8E0D2] text-xs font-semibold text-[#E05A47]">
@@ -257,17 +267,83 @@ export const DropPage: React.FC<DropPageProps> = ({
           </p>
         </div>
 
-        {hasCandidates && (
+        {/* Reset & Test Quick Controls */}
+        <div className="flex flex-wrap items-center gap-2.5 self-start lg:self-auto">
           <button
             type="button"
-            onClick={() => navigate('/moments')}
-            className="btn btn--secondary self-start lg:self-auto"
+            onClick={onResetStudio}
+            disabled={isPipelineRunning}
+            title="Reset generated video and Shorts to start a clean run"
+            className="px-4 py-2.5 rounded-full bg-[#FAF7F2] border-2 border-[#D8CEBE] text-xs font-bold text-[#1F1C18] hover:border-[#E05A47] hover:bg-[#F3EDE2] transition-all flex items-center gap-1.5 cursor-pointer"
           >
-            <span>See Picked Moments</span>
-            <ArrowRight className="w-4 h-4" />
+            <RotateCcw className="w-3.5 h-3.5 text-[#E05A47]" />
+            <span>Reset</span>
           </button>
-        )}
+
+          <button
+            type="button"
+            onClick={onLoadTestRun}
+            disabled={isPipelineRunning}
+            title="Load pre-populated lggpuoaP_C8 video, Moments, Snip, and Make it Shine for a <1 min demo"
+            className={`px-4 py-2.5 rounded-full border-2 text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+              isTestMode && hasCandidates
+                ? 'bg-[#2D8A61] border-[#1F1C18] text-white shadow-sm'
+                : 'bg-[#F59E0B]/20 border-[#F59E0B] text-[#78350F] hover:bg-[#F59E0B]/30'
+            }`}
+          >
+            <Play className="w-3.5 h-3.5" />
+            <span>{isTestMode && hasCandidates ? 'Test Loaded (4 Shorts)' : 'Test'}</span>
+          </button>
+
+          {hasCandidates && (
+            <button
+              type="button"
+              onClick={() => navigate('/moments')}
+              className="btn btn--secondary"
+            >
+              <span>See Picked Moments ({candidatesCount || 4})</span>
+              <ArrowRight className="w-4 h-4" />
+            </button>
+          )}
+        </div>
       </div>
+
+      {/* Test Mode Instant Demo Banner when active */}
+      {hasCandidates && (
+        <div className="p-4 rounded-2xl bg-[#2D8A61]/12 border border-[#2D8A61]/35 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <span className="w-2.5 h-2.5 rounded-full bg-[#2D8A61]" />
+            <span className="text-xs sm:text-sm font-semibold text-[#1F1C18]">
+              {isTestMode
+                ? 'Test Run Ready: lggpuoaP_C8 + 4 reframed Shorts, filler/pause edits, and instant MP4 download are pre-populated.'
+                : `${candidatesCount} reframed 9:16 Shorts are ready to explore across all steps.`}
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => navigate('/moments')}
+              className="px-3.5 py-1.5 rounded-full bg-[#FAF7F2] border border-[#1F1C18] text-xs font-bold text-[#1F1C18] hover:bg-[#F3EDE2] cursor-pointer"
+            >
+              2. Pick a Moment
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/snip')}
+              className="px-3.5 py-1.5 rounded-full bg-[#FAF7F2] border border-[#1F1C18] text-xs font-bold text-[#1F1C18] hover:bg-[#F3EDE2] cursor-pointer"
+            >
+              3. Snip the Fluff
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/shine')}
+              className="px-3.5 py-1.5 rounded-full bg-[#E05A47] border border-[#1F1C18] text-xs font-bold text-white hover:bg-[#C94836] cursor-pointer"
+            >
+              4. Make it Shine &amp; Export
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Main 12-Col Cozy Studio Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
